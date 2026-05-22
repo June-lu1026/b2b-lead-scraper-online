@@ -1,5 +1,5 @@
 /*
-  B2B Lead Scraper - Free / No API version
+  B2B Lead Scraper - Free Cycling Dealer Version
   Requires: Node.js 18+
   No npm install needed. Uses only built-in Node.js modules.
 
@@ -22,7 +22,7 @@ const path = require('path');
 const fs = require('fs');
 
 const PORT = Number(process.env.PORT || 3000);
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 B2BLeadScraperFree/1.0';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 B2BLeadScraperCycling/1.1';
 const REQUEST_TIMEOUT_MS = 12000;
 const SEARCH_DELAY_MS = 900;
 const PAGE_DELAY_MS = 350;
@@ -87,7 +87,7 @@ function isBlockedHost(rawUrl) {
     'twitter.com', 'pinterest.com', 'reddit.com', 'wikipedia.org',
     'amazon.com', 'ebay.com', 'apple.com', 'mapquest.com',
     'tripadvisor.com', 'yelp.com', 'yellowpages.com', 'trustpilot.com',
-    'opencorporates.com', 'zoominfo.com', 'rocketreach.co'
+    'opencorporates.com', 'zoominfo.com', 'rocketreach.co', 'microsoft.com', 'office.com', 'live.com', 'msn.com', 'github.com', 'stackoverflow.com', 'medium.com'
   ];
   return blocked.some(domain => host === domain || host.endsWith('.' + domain));
 }
@@ -167,25 +167,69 @@ async function fetchText(rawUrl, options = {}) {
   }
 }
 
+
 function buildSearchQueries(keyword, location) {
-  const base = `${keyword} ${location}`.trim();
-  const queries = [
-    `"${base}" official website email`,
-    `"${base}" contact`,
-    `"${base}" sales email`,
-    `"${keyword}" "${location}" wholesale distributor`,
-    `"${keyword}" "${location}"`
-  ];
-  return Array.from(new Set(queries));
+  const kw = normalizeWhitespace(keyword || 'bike dealer');
+  const loc = normalizeWhitespace(location || '');
+  const lower = `${kw} ${loc}`.toLowerCase();
+  const isCycling = /\b(bicycle|bike|cycling|cycle|fahrrad|velo|ebike|e-bike|mtb)\b/i.test(lower);
+  let queries;
+  if (isCycling) {
+    queries = [
+      `"bike shop" "${loc}" contact email`,
+      `"bicycle shop" "${loc}" official website`,
+      `"cycling store" "${loc}" contact`,
+      `"bicycle dealer" "${loc}"`,
+      `"bike dealer" "${loc}" contact`,
+      `"Fahrradladen" "${loc}"`,
+      `"Radladen" "${loc}"`,
+      `"bicycle accessories" "${loc}" dealer`,
+      `"bike parts" "${loc}" shop`,
+      `"cycling accessories distributor" "${loc}"`,
+      `"bicycle parts distributor" "${loc}"`,
+      `"bike accessories wholesale" "${loc}"`
+    ];
+  } else {
+    const base = `${kw} ${loc}`.trim();
+    queries = [
+      `"${base}" official website email`,
+      `"${base}" contact`,
+      `"${base}" dealer retailer`,
+      `"${kw}" "${loc}" wholesale distributor`
+    ];
+  }
+  return Array.from(new Set(queries.filter(Boolean)));
 }
 
-function extractSearchLinks(html) {
+function dedupeLinksByHost(links) {
+  const seen = new Set();
+  const cleaned = [];
+  for (const url of links) {
+    const host = hostOf(url);
+    if (!host || seen.has(host) || isBlockedHost(url)) continue;
+    seen.add(host);
+    cleaned.push(url);
+  }
+  return cleaned;
+}
+
+function extractDuckDuckGoLinks(html) {
+  const links = [];
+  const pattern = /class="result__a"[^>]+href="([^"]+)"/gi;
+  let match;
+  while ((match = pattern.exec(html)) !== null) {
+    const url = cleanUrl(match[1]);
+    if (url && !isBlockedHost(url)) links.push(url);
+  }
+  return dedupeLinksByHost(links);
+}
+
+function extractBingLinks(html) {
   const links = [];
   const patterns = [
-    /class="result__a"[^>]+href="([^"]+)"/gi,
-    /<a[^>]+href="([^"]+)"[^>]*>/gi
+    /<li[^>]+class="[^"]*b_algo[^"]*"[\s\S]*?<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/gi,
+    /<h2[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"/gi
   ];
-
   for (const pattern of patterns) {
     let match;
     while ((match = pattern.exec(html)) !== null) {
@@ -193,27 +237,17 @@ function extractSearchLinks(html) {
       if (url && !isBlockedHost(url)) links.push(url);
     }
   }
-
-  const seen = new Set();
-  const cleaned = [];
-  for (const url of links) {
-    const host = hostOf(url);
-    if (!host || seen.has(host)) continue;
-    seen.add(host);
-    cleaned.push(url);
-  }
-  return cleaned;
+  return dedupeLinksByHost(links);
 }
 
 async function searchDuckDuckGo(query, maxLinks) {
   const url = 'https://html.duckduckgo.com/html/?' + new URLSearchParams({ q: query }).toString();
   const getResult = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
   if (getResult.ok) {
-    const links = extractSearchLinks(getResult.text).slice(0, maxLinks);
+    const links = extractDuckDuckGoLinks(getResult.text).slice(0, maxLinks);
     if (links.length) return links;
   }
 
-  // Some environments return better results with POST.
   const form = new URLSearchParams({ q: query });
   const postResult = await fetchText('https://html.duckduckgo.com/html/', {
     method: 'POST',
@@ -222,14 +256,14 @@ async function searchDuckDuckGo(query, maxLinks) {
     timeoutMs: REQUEST_TIMEOUT_MS
   });
   if (!postResult.ok) return [];
-  return extractSearchLinks(postResult.text).slice(0, maxLinks);
+  return extractDuckDuckGoLinks(postResult.text).slice(0, maxLinks);
 }
 
 async function searchBing(query, maxLinks) {
   const url = 'https://www.bing.com/search?' + new URLSearchParams({ q: query, count: String(Math.min(50, maxLinks + 10)) }).toString();
   const result = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
   if (!result.ok) return [];
-  return extractSearchLinks(result.text).slice(0, maxLinks);
+  return extractBingLinks(result.text).slice(0, maxLinks);
 }
 
 function parseManualWebsites(raw) {
@@ -400,6 +434,64 @@ function extractCandidatePageLinks(baseUrl, html) {
   }).slice(0, 6);
 }
 
+
+const CYCLING_TERMS = [
+  'bicycle','bicycles','bike','bikes','cycling','cycle','cycles','ebike','e-bike','mtb',
+  'road bike','mountain bike','gravel bike','bike parts','bicycle parts','cycling accessories',
+  'fahrrad','fahrräder','fahrradladen','radladen','rennrad','mountainbike','velo'
+];
+const CHANNEL_TERMS = [
+  'shop','store','retailer','dealer','dealers','distributor','distribution','wholesale','wholesaler',
+  'reseller','stockist','importer','trade','b2b','parts','accessories','workshop','repair','service',
+  'laden','händler','haendler','vertrieb','grosshandel','großhandel'
+];
+const STRONG_NEGATIVE_TERMS = [
+  'microsoft','bing','software','privacy policy','terms of service','digital services act',
+  'support page','help center','login','careers','jobs','press release'
+];
+const KNOWN_BRAND_OR_MARKETPLACE_DOMAINS = [
+  'trekbikes.com','specialized.com','giant-bicycles.com','cannondale.com','canyon.com',
+  'shimano.com','sram.com','bosch-ebike.com','rei.com','bikesdirect.com'
+];
+function includesAny(text, terms) {
+  const lower = String(text || '').toLowerCase();
+  return terms.some(term => lower.includes(term.toLowerCase()));
+}
+function locationTokens(location) {
+  const tokens = String(location || '').toLowerCase().split(/[^a-z0-9äöüß]+/i).map(t => t.trim()).filter(t => t.length >= 3);
+  if (/germany|deutschland|de\b/i.test(location || '')) tokens.push('germany','deutschland','german','berlin','.de');
+  return Array.from(new Set(tokens));
+}
+function scoreTargetFit({ lead, allText, location }) {
+  const host = hostOf(lead.website || '');
+  const title = lead.business_name || '';
+  const text = `${title} ${host} ${lead.website || ''} ${allText || ''}`.toLowerCase();
+  const titleHost = `${title} ${host}`.toLowerCase();
+  let score = 0;
+  const notes = [];
+  if (includesAny(titleHost, CYCLING_TERMS)) { score += 35; notes.push('cycling in title/domain'); }
+  else if (includesAny(text, CYCLING_TERMS)) { score += 25; notes.push('cycling content'); }
+  if (includesAny(titleHost, CHANNEL_TERMS)) { score += 30; notes.push('dealer/shop/distributor in title/domain'); }
+  else if (includesAny(text, CHANNEL_TERMS)) { score += 20; notes.push('dealer/shop/distributor content'); }
+  const locTokens = locationTokens(location);
+  let locHit = false;
+  for (const token of locTokens) {
+    if (token === '.de' && host.endsWith('.de')) locHit = true;
+    else if (token !== '.de' && text.includes(token)) locHit = true;
+  }
+  if (locHit) { score += 25; notes.push('location match'); }
+  else if (location) { score -= 20; notes.push('weak location match'); }
+  if (lead.priority_email && classifyEmail(lead.priority_email) !== 'low-priority') score += 10;
+  if (includesAny(text.slice(0, 5000), STRONG_NEGATIVE_TERMS)) { score -= 50; notes.push('irrelevant/support/tech signals'); }
+  if (KNOWN_BRAND_OR_MARKETPLACE_DOMAINS.some(d => host === d || host.endsWith('.' + d))) { score -= 35; notes.push('likely brand/marketplace, not dealer/distributor'); }
+  score = Math.max(0, Math.min(100, score));
+  let category = 'needs-review';
+  if (score >= 75) category = 'strong cycling dealer/distributor fit';
+  else if (score >= 50) category = 'possible cycling channel lead';
+  else category = 'low relevance';
+  return { score, notes: notes.join(', '), category };
+}
+
 function calculateLeadScore({ website, phone, emails, priorityEmail, allText }) {
   let score = 0;
   if (website) score += 20;
@@ -414,7 +506,7 @@ function calculateLeadScore({ website, phone, emails, priorityEmail, allText }) 
   return Math.min(score, 100);
 }
 
-async function analyzeWebsite(site) {
+async function analyzeWebsite(site, context = {}) {
   const homepage = await fetchText(site.url);
   const finalUrl = homepage.url || site.url;
   const host = hostOf(finalUrl);
@@ -436,6 +528,9 @@ async function analyzeWebsite(site) {
       contact_page_url: '',
       source: site.query,
       lead_score: 0,
+      target_fit_score: 0,
+      target_category: 'fetch failed',
+      target_notes: '',
       notes: homepage.error ? `Could not fetch homepage: ${homepage.error}` : `Homepage HTTP ${homepage.status}`,
       do_not_contact: false,
       created_at: new Date().toISOString()
@@ -475,8 +570,7 @@ async function analyzeWebsite(site) {
 
   const website = finalUrl;
   const lead_score = calculateLeadScore({ website, phone, emails, priorityEmail: priority, allText: combinedText });
-
-  return {
+  const baseLead = {
     business_name: title,
     website,
     phone,
@@ -490,6 +584,12 @@ async function analyzeWebsite(site) {
     do_not_contact: false,
     created_at: new Date().toISOString()
   };
+  const fit = scoreTargetFit({ lead: baseLead, allText: combinedText, location: context.location || '' });
+  baseLead.target_fit_score = fit.score;
+  baseLead.target_category = fit.category;
+  baseLead.target_notes = fit.notes;
+  baseLead.lead_score = Math.round((lead_score * 0.45) + (fit.score * 0.55));
+  return baseLead;
 }
 
 function parseBody(req) {
@@ -549,9 +649,9 @@ const INDEX_HTML = `<!doctype html>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>海外 B2B 线索采集工具 - 免费版</h1>
-      <p class="sub">不需要 Google Places API，不需要 npm install。输入行业关键词和地区，工具会用公开搜索结果寻找官网，并从官网公开页面提取邮箱和电话。</p>
-      <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。结果质量取决于公开搜索结果和目标网站内容。如果公开搜索源返回 0 条，可以在下面直接粘贴官网列表，工具会直接提取邮箱。</div>
+      <h1>骑行配件 B2B 线索采集工具 - 经销商/分销商版</h1>
+      <p class="sub">专门用于寻找自行车店、骑行店、配件经销商、批发商和分销商官网，并从公开页面提取邮箱和电话。</p>
+      <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。系统会过滤 Microsoft/搜索引擎帮助页、品牌官网、无关平台等低相关结果。免费版仍依赖公开搜索结果；如果搜索不准，建议直接粘贴官网列表。</div>
       <div style="margin-top:16px;">
         <label>可选：直接粘贴官网列表，一行一个。填了这里会优先分析这些网站，不依赖公开搜索。</label>
         <textarea id="websites" placeholder="例如：&#10;https://example-bike-shop.de&#10;https://example-distributor.com" style="width:100%; box-sizing:border-box; min-height:76px; border:1px solid #d1d5db; border-radius:12px; padding:11px 12px; font-size:14px; resize:vertical;"></textarea>
@@ -559,7 +659,7 @@ const INDEX_HTML = `<!doctype html>
       <div class="grid">
         <div>
           <label>行业关键词</label>
-          <input id="keyword" placeholder="例如 Bicycle shop / Sports distributor" value="Bicycle shop">
+          <input id="keyword" placeholder="例如 bike dealer / bicycle shop / cycling accessories distributor" value="bike dealer">
         </div>
         <div>
           <label>地区</label>
@@ -587,6 +687,7 @@ const INDEX_HTML = `<!doctype html>
           <thead>
             <tr>
               <th>分数</th>
+              <th>匹配度</th>
               <th>公司/网站</th>
               <th>电话</th>
               <th>优先邮箱</th>
@@ -643,7 +744,7 @@ function toCsvValue(v) {
 function downloadCsv() {
   const headers = [
     'business_name','website','phone','emails','priority_email','email_type',
-    'contact_page_url','source','lead_score','notes','do_not_contact','created_at'
+    'contact_page_url','source','lead_score','target_fit_score','target_category','target_notes','notes','do_not_contact','created_at'
   ];
   const csv = [headers.join(',')].concat(rows.map(r => headers.map(h => toCsvValue(r[h])).join(','))).join('\\r\\n');
   const blob = new Blob(['\\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
@@ -773,8 +874,13 @@ async function handleSearch(req, res) {
     for (const site of sites) {
       current += 1;
       write({ type: 'progress', current, total: sites.length, website: site.url });
-      const lead = await analyzeWebsite(site);
-      write({ type: 'lead', data: lead });
+      const lead = await analyzeWebsite(site, { keyword, location });
+      const isManual = manualSites.length > 0;
+      if (isManual || lead.target_fit_score >= 45) {
+        write({ type: 'lead', data: lead });
+      } else {
+        write({ type: 'status', message: `跳过低相关结果：${lead.business_name || site.url}` });
+      }
       await sleep(PAGE_DELAY_MS);
     }
 
