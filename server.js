@@ -22,7 +22,7 @@ const path = require('path');
 const fs = require('fs');
 
 const PORT = Number(process.env.PORT || 3000);
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 B2BLeadScraperCycling/1.1';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 B2BLeadScraperCycling/1.2-filter';
 const REQUEST_TIMEOUT_MS = 12000;
 const SEARCH_DELAY_MS = 900;
 const PAGE_DELAY_MS = 350;
@@ -447,11 +447,13 @@ const CHANNEL_TERMS = [
 ];
 const STRONG_NEGATIVE_TERMS = [
   'microsoft','bing','software','privacy policy','terms of service','digital services act',
-  'support page','help center','login','careers','jobs','press release'
+  'support page','help center','login','careers','jobs','press release',
+  'news','magazine','review','reviews','blog','forum','best bike','top bike','buyers guide','buying guide','roundup','comparison'
 ];
 const KNOWN_BRAND_OR_MARKETPLACE_DOMAINS = [
   'trekbikes.com','specialized.com','giant-bicycles.com','cannondale.com','canyon.com',
-  'shimano.com','sram.com','bosch-ebike.com','rei.com','bikesdirect.com'
+  'shimano.com','sram.com','bosch-ebike.com','rei.com','bikesdirect.com',
+  'cyclingnews.com','bicycling.com','road.cc','bikeperfect.com','pinkbike.com','singletracks.com','bikeradar.com'
 ];
 function includesAny(text, terms) {
   const lower = String(text || '').toLowerCase();
@@ -628,7 +630,13 @@ const INDEX_HTML = `<!doctype html>
     .sub { margin: 0; color: #6b7280; line-height: 1.6; }
     .grid { display: grid; grid-template-columns: 1fr 1fr 140px auto; gap: 12px; align-items: end; margin-top: 18px; }
     label { display: block; font-size: 13px; color: #4b5563; margin-bottom: 6px; }
-    input { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 12px; padding: 11px 12px; font-size: 15px; }
+    input, select { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 12px; padding: 11px 12px; font-size: 15px; background:#fff; }
+    .filter-box { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
+    .filter-grid { display:grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap:10px; align-items:end; }
+    .checks { display:flex; flex-wrap:wrap; gap:12px; margin-top:10px; font-size:13px; color:#374151; }
+    .checks label { display:flex; align-items:center; gap:6px; margin:0; }
+    .checks input { width:auto; }
+    .tiny { font-size:12px; color:#6b7280; margin-top:6px; }
     button { border: 0; border-radius: 12px; padding: 12px 16px; background: #111827; color: #fff; cursor: pointer; font-size: 15px; }
     button.secondary { background: #374151; }
     button:disabled { opacity: .55; cursor: not-allowed; }
@@ -643,13 +651,13 @@ const INDEX_HTML = `<!doctype html>
     .muted { color:#6b7280; }
     .note { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; border-radius:14px; padding:12px 14px; margin-top:14px; font-size:14px; line-height:1.55; }
     a { color: #2563eb; text-decoration: none; }
-    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 850px) { .grid, .filter-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>骑行配件 B2B 线索采集工具 - 经销商/分销商版</h1>
+      <h1>骑行配件 B2B 线索采集工具 - 筛选版</h1>
       <p class="sub">专门用于寻找自行车店、骑行店、配件经销商、批发商和分销商官网，并从公开页面提取邮箱和电话。</p>
       <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。系统会过滤 Microsoft/搜索引擎帮助页、品牌官网、无关平台等低相关结果。免费版仍依赖公开搜索结果；如果搜索不准，建议直接粘贴官网列表。</div>
       <div style="margin-top:16px;">
@@ -680,7 +688,55 @@ const INDEX_HTML = `<!doctype html>
     <div class="card">
       <div style="display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:12px;">
         <div><strong>结果</strong> <span class="muted" id="count">0 条</span></div>
-        <button class="secondary" id="downloadBtn" disabled>下载 CSV</button>
+        <button class="secondary" id="downloadBtn" disabled>下载筛选后 CSV</button>
+      </div>
+      <div class="filter-box">
+        <div style="font-weight:700; margin-bottom:10px;">筛选结果</div>
+        <div class="filter-grid">
+          <div>
+            <label>搜索结果内关键词</label>
+            <input id="filterText" placeholder="例如 berlin / distributor / shop">
+          </div>
+          <div>
+            <label>线索类型</label>
+            <select id="filterType">
+              <option value="channel" selected>店/经销商/分销商</option>
+              <option value="shop">只看门店/零售店</option>
+              <option value="dealer">只看经销商/Dealer</option>
+              <option value="distributor">只看分销商/Distributor</option>
+              <option value="wholesale">只看批发/Wholesale</option>
+              <option value="all">不限</option>
+            </select>
+          </div>
+          <div>
+            <label>最低总分</label>
+            <input id="minScore" type="number" min="0" max="100" value="50">
+          </div>
+          <div>
+            <label>最低匹配度</label>
+            <input id="minFit" type="number" min="0" max="100" value="45">
+          </div>
+          <div>
+            <label>匹配等级</label>
+            <select id="fitCategory">
+              <option value="all">不限</option>
+              <option value="strong">强匹配</option>
+              <option value="possible" selected>强匹配 + 可能匹配</option>
+            </select>
+          </div>
+          <div>
+            <label>排除关键词</label>
+            <input id="excludeText" value="microsoft,bing,cyclingnews,magazine,news,review,forum,wikipedia,amazon,ebay">
+          </div>
+        </div>
+        <div class="checks">
+          <label><input id="requireEmail" type="checkbox" checked> 只看有邮箱</label>
+          <label><input id="requirePhone" type="checkbox"> 只看有电话</label>
+          <label><input id="strictLocation" type="checkbox" checked> 地区相关 / 德国站优先</label>
+          <label><input id="hideMedia" type="checkbox" checked> 隐藏新闻/测评/论坛/平台页</label>
+          <label><input id="sortByScore" type="checkbox" checked> 按分数排序</label>
+        </div>
+        <div class="tiny">提示：如果你要找德国本地客户，建议关键词用 Fahrradladen、Fahrrad Händler、bike dealer、bicycle parts distributor，并保持“地区相关”开启。</div>
       </div>
       <div class="table-wrap">
         <table>
@@ -719,21 +775,101 @@ function setStatus(msg) {
   statusEl.textContent = msg || '';
 }
 
+let filteredRows = [];
+
+function leadText(row) {
+  return [
+    row.business_name, row.website, row.phone, row.priority_email,
+    (row.emails || []).join(' '), row.email_type, row.target_category,
+    row.target_notes, row.notes
+  ].join(' ').toLowerCase();
+}
+
+function splitWords(value) {
+  return String(value || '').split(/[,;，、\n]+/).map(function(s) { return s.trim().toLowerCase(); }).filter(Boolean);
+}
+
+function typeMatches(row, type) {
+  if (type === 'all') return true;
+  const text = leadText(row);
+  const sets = {
+    channel: ['shop','store','retailer','dealer','distributor','wholesale','wholesaler','händler','haendler','laden','vertrieb','grosshandel','großhandel','b2b','trade'],
+    shop: ['shop','store','retailer','fahrradladen','radladen','laden','workshop','repair'],
+    dealer: ['dealer','dealers','händler','haendler','reseller','stockist'],
+    distributor: ['distributor','distribution','vertrieb','importer','export'],
+    wholesale: ['wholesale','wholesaler','grosshandel','großhandel','b2b','trade']
+  };
+  return (sets[type] || []).some(function(w) { return text.includes(w); });
+}
+
+function locationMatches(row) {
+  const loc = document.getElementById('location').value.toLowerCase();
+  if (!loc.trim()) return true;
+  const rowText = [row.business_name, row.website, row.target_notes, row.notes].join(' ').toLowerCase();
+  const host = (function() { try { return new URL(row.website).hostname.toLowerCase(); } catch (e) { return ''; } })();
+  const tokens = loc.split(/[^a-z0-9äöüß]+/i).filter(function(t) { return t.length >= 3; });
+  if (/germany|deutschland|de\b/i.test(loc) && host.endsWith('.de')) return true;
+  return tokens.some(function(t) { return rowText.includes(t); });
+}
+
+function rowPassesFilters(row) {
+  const text = leadText(row);
+  const search = document.getElementById('filterText').value.trim().toLowerCase();
+  if (search && !text.includes(search)) return false;
+
+  const minScore = Number(document.getElementById('minScore').value || 0);
+  const minFit = Number(document.getElementById('minFit').value || 0);
+  if (Number(row.lead_score || 0) < minScore) return false;
+  if (Number(row.target_fit_score || 0) < minFit) return false;
+
+  const cat = document.getElementById('fitCategory').value;
+  const target = String(row.target_category || '').toLowerCase();
+  if (cat === 'strong' && !target.includes('strong')) return false;
+  if (cat === 'possible' && !(target.includes('strong') || target.includes('possible'))) return false;
+
+  if (!typeMatches(row, document.getElementById('filterType').value)) return false;
+  if (document.getElementById('requireEmail').checked && !(row.emails || []).length) return false;
+  if (document.getElementById('requirePhone').checked && !row.phone) return false;
+  if (document.getElementById('strictLocation').checked && !locationMatches(row)) return false;
+
+  if (document.getElementById('hideMedia').checked) {
+    const mediaWords = ['news','magazine','review','reviews','blog','forum','wiki','best bike','top bike','buying guide','buyers guide','comparison','youtube','facebook','instagram'];
+    if (mediaWords.some(function(w) { return text.includes(w); })) return false;
+  }
+
+  const exclude = splitWords(document.getElementById('excludeText').value);
+  if (exclude.some(function(w) { return text.includes(w); })) return false;
+  return true;
+}
+
+function renderRows() {
+  filteredRows = rows.filter(rowPassesFilters);
+  if (document.getElementById('sortByScore').checked) {
+    filteredRows.sort(function(a, b) { return Number(b.lead_score || 0) - Number(a.lead_score || 0); });
+  }
+  tbody.innerHTML = '';
+  countEl.textContent = filteredRows.length + ' / ' + rows.length + ' 条';
+  downloadBtn.disabled = filteredRows.length === 0;
+
+  for (const row of filteredRows) {
+    const tr = document.createElement('tr');
+    const contact = row.contact_page_url ? '<a target="_blank" href="' + esc(row.contact_page_url) + '">打开</a>' : '';
+    tr.innerHTML =
+      '<td><span class="pill">' + esc(row.lead_score) + '</span></td>' +
+      '<td><span class="pill">' + esc(row.target_fit_score || '') + '</span><br><span class="muted">' + esc(row.target_category || '') + '</span></td>' +
+      '<td><strong>' + esc(row.business_name) + '</strong><br><a href="' + esc(row.website) + '" target="_blank">' + esc(row.website) + '</a></td>' +
+      '<td>' + esc(row.phone) + '</td>' +
+      '<td><strong>' + esc(row.priority_email) + '</strong><br><span class="muted">' + esc(row.email_type) + '</span></td>' +
+      '<td>' + esc((row.emails || []).join('; ')) + '</td>' +
+      '<td>' + contact + '</td>' +
+      '<td class="muted">' + esc([row.target_notes, row.notes].filter(Boolean).join('; ')) + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
 function addRow(row) {
   rows.push(row);
-  countEl.textContent = rows.length + ' 条';
-  downloadBtn.disabled = rows.length === 0;
-  const tr = document.createElement('tr');
-  tr.innerHTML = \`
-    <td><span class="pill">\${esc(row.lead_score)}</span></td>
-    <td><strong>\${esc(row.business_name)}</strong><br><a href="\${esc(row.website)}" target="_blank">\${esc(row.website)}</a></td>
-    <td>\${esc(row.phone)}</td>
-    <td><strong>\${esc(row.priority_email)}</strong><br><span class="muted">\${esc(row.email_type)}</span></td>
-    <td>\${esc((row.emails || []).join('; '))}</td>
-    <td>\${row.contact_page_url ? '<a target="_blank" href="' + esc(row.contact_page_url) + '">打开</a>' : ''}</td>
-    <td class="muted">\${esc(row.notes)}</td>
-  \`;
-  tbody.appendChild(tr);
+  renderRows();
 }
 
 function toCsvValue(v) {
@@ -746,12 +882,13 @@ function downloadCsv() {
     'business_name','website','phone','emails','priority_email','email_type',
     'contact_page_url','source','lead_score','target_fit_score','target_category','target_notes','notes','do_not_contact','created_at'
   ];
-  const csv = [headers.join(',')].concat(rows.map(r => headers.map(h => toCsvValue(r[h])).join(','))).join('\\r\\n');
+  const data = filteredRows.length ? filteredRows : rows;
+  const csv = [headers.join(',')].concat(data.map(function(r) { return headers.map(function(h) { return toCsvValue(r[h]); }).join(','); })).join('\\r\\n');
   const blob = new Blob(['\\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'b2b-leads-free.csv';
+  a.download = 'b2b-leads-filtered.csv';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -759,11 +896,17 @@ function downloadCsv() {
 }
 
 downloadBtn.addEventListener('click', downloadCsv);
+for (const id of ['filterText','filterType','minScore','minFit','fitCategory','excludeText','requireEmail','requirePhone','strictLocation','hideMedia','sortByScore']) {
+  document.addEventListener('input', function(e) { if (e.target && e.target.id === id) renderRows(); });
+  document.addEventListener('change', function(e) { if (e.target && e.target.id === id) renderRows(); });
+}
+
 
 startBtn.addEventListener('click', async () => {
   rows.length = 0;
   tbody.innerHTML = '';
   countEl.textContent = '0 条';
+  filteredRows = [];
   downloadBtn.disabled = true;
   fillEl.style.width = '0%';
   startBtn.disabled = true;
