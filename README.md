@@ -1,45 +1,29 @@
-# B2B Lead Scraper - Online Deploy Version
+# b2b-lead-scraper-online v2
 
-This is the online deploy version of the free B2B lead scraper.
+Free online B2B lead scraper.
 
-## Features
+- No Google Places API key needed
+- No Gemini key needed
+- Uses only built-in Node.js APIs
+- Searches public web results and extracts public emails/phones from company websites
+- v2 adds Bing fallback and manual website list mode
 
-- No Google Places API key required
-- No Gemini API key required
-- No npm dependencies
-- Runs as a Node.js web service
-- Suitable for Render/Railway/other Node.js hosting
+## Deploy on Render
 
-## Local run
+Build Command:
 
 ```bash
-node server.js
+npm install
 ```
 
-Open:
+Start Command:
 
-```text
-http://localhost:3000
+```bash
+npm start
 ```
 
-## Deploy to Render
+No environment variables are required.
 
-1. Create a GitHub repository.
-2. Upload these files to the repository:
-   - `server.js`
-   - `package.json`
-   - `render.yaml`
-   - `README.md`
-3. Open Render.
-4. Create a new Web Service from the GitHub repository.
-5. Use:
-   - Runtime: Node
-   - Build Command: empty
-   - Start Command: `npm start`
-6. Deploy.
+## If search returns 0
 
-The service will use the `PORT` environment variable supplied by Render.
-
-## Compliance
-
-Use this only to collect public business contact information from publicly accessible websites. Keep request limits small, do not bypass login pages, CAPTCHAs, paywalls, or anti-bot protections, and honor opt-out requests.
+Public search engines may block cloud servers such as Render. Use the manual website list field: paste one website per line, then the app will directly extract emails from those websites.

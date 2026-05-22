@@ -105,6 +105,21 @@ function cleanUrl(rawUrl) {
     }
   } catch {}
 
+  // Bing redirect URL, e.g. /ck/a?...&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbQ...
+  try {
+    if (u.startsWith('/ck/') || u.includes('bing.com/ck/')) {
+      const parsed = new URL(u.startsWith('/') ? 'https://www.bing.com' + u : u);
+      const encoded = parsed.searchParams.get('u');
+      if (encoded) {
+        let b64 = encoded;
+        if (b64.startsWith('a1')) b64 = b64.slice(2);
+        b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        if (/^https?:\/\//i.test(decoded)) u = decoded;
+      }
+    }
+  } catch {}
+
   if (u.startsWith('//')) u = 'https:' + u;
   if (!/^https?:\/\//i.test(u)) return '';
 
@@ -124,14 +139,17 @@ async function fetchText(rawUrl, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
   try {
+    const headers = {
+      'User-Agent': options.userAgent || USER_AGENT,
+      'Accept': options.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': options.acceptLanguage || 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7'
+    };
+    if (options.contentType) headers['Content-Type'] = options.contentType;
+
     const response = await fetch(rawUrl, {
       method: options.method || 'GET',
       body: options.body,
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': options.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Content-Type': options.contentType || undefined
-      },
+      headers,
       redirect: 'follow',
       signal: controller.signal
     });
@@ -188,35 +206,75 @@ function extractSearchLinks(html) {
 }
 
 async function searchDuckDuckGo(query, maxLinks) {
+  const url = 'https://html.duckduckgo.com/html/?' + new URLSearchParams({ q: query }).toString();
+  const getResult = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
+  if (getResult.ok) {
+    const links = extractSearchLinks(getResult.text).slice(0, maxLinks);
+    if (links.length) return links;
+  }
+
+  // Some environments return better results with POST.
   const form = new URLSearchParams({ q: query });
-  const result = await fetchText('https://html.duckduckgo.com/html/', {
+  const postResult = await fetchText('https://html.duckduckgo.com/html/', {
     method: 'POST',
     body: form.toString(),
     contentType: 'application/x-www-form-urlencoded',
     timeoutMs: REQUEST_TIMEOUT_MS
   });
+  if (!postResult.ok) return [];
+  return extractSearchLinks(postResult.text).slice(0, maxLinks);
+}
 
+async function searchBing(query, maxLinks) {
+  const url = 'https://www.bing.com/search?' + new URLSearchParams({ q: query, count: String(Math.min(50, maxLinks + 10)) }).toString();
+  const result = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
   if (!result.ok) return [];
   return extractSearchLinks(result.text).slice(0, maxLinks);
 }
+
+function parseManualWebsites(raw) {
+  const parts = String(raw || '')
+    .split(/[\s,;]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  const sites = [];
+  const seen = new Set();
+  for (let item of parts) {
+    if (!/^https?:\/\//i.test(item)) item = 'https://' + item;
+    const url = cleanUrl(item);
+    const host = hostOf(url);
+    if (!url || !host || seen.has(host) || isBlockedHost(url)) continue;
+    seen.add(host);
+    sites.push({ url, query: 'manual website list' });
+  }
+  return sites;
+}
+
 
 async function discoverCandidateSites(keyword, location, limit, onProgress) {
   const queries = buildSearchQueries(keyword, location);
   const seenHosts = new Set();
   const sites = [];
+  const searchers = [
+    { name: 'DuckDuckGo', fn: searchDuckDuckGo },
+    { name: 'Bing', fn: searchBing }
+  ];
 
   for (const query of queries) {
     if (sites.length >= limit) break;
-    onProgress({ type: 'status', message: `Searching: ${query}` });
-    const links = await searchDuckDuckGo(query, Math.max(10, limit));
-    for (const link of links) {
-      const host = hostOf(link);
-      if (!host || seenHosts.has(host)) continue;
-      seenHosts.add(host);
-      sites.push({ url: link, query });
+    for (const searcher of searchers) {
       if (sites.length >= limit) break;
+      onProgress({ type: 'status', message: `${searcher.name} searching: ${query}` });
+      const links = await searcher.fn(query, Math.max(10, limit));
+      for (const link of links) {
+        const host = hostOf(link);
+        if (!host || seenHosts.has(host)) continue;
+        seenHosts.add(host);
+        sites.push({ url: link, query: `${searcher.name}: ${query}` });
+        if (sites.length >= limit) break;
+      }
+      await sleep(SEARCH_DELAY_MS);
     }
-    await sleep(SEARCH_DELAY_MS);
   }
 
   return sites;
@@ -493,7 +551,11 @@ const INDEX_HTML = `<!doctype html>
     <div class="card">
       <h1>海外 B2B 线索采集工具 - 免费版</h1>
       <p class="sub">不需要 Google Places API，不需要 npm install。输入行业关键词和地区，工具会用公开搜索结果寻找官网，并从官网公开页面提取邮箱和电话。</p>
-      <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。结果质量取决于公开搜索结果和目标网站内容。</div>
+      <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。结果质量取决于公开搜索结果和目标网站内容。如果公开搜索源返回 0 条，可以在下面直接粘贴官网列表，工具会直接提取邮箱。</div>
+      <div style="margin-top:16px;">
+        <label>可选：直接粘贴官网列表，一行一个。填了这里会优先分析这些网站，不依赖公开搜索。</label>
+        <textarea id="websites" placeholder="例如：&#10;https://example-bike-shop.de&#10;https://example-distributor.com" style="width:100%; box-sizing:border-box; min-height:76px; border:1px solid #d1d5db; border-radius:12px; padding:11px 12px; font-size:14px; resize:vertical;"></textarea>
+      </div>
       <div class="grid">
         <div>
           <label>行业关键词</label>
@@ -608,7 +670,8 @@ startBtn.addEventListener('click', async () => {
   const payload = {
     keyword: document.getElementById('keyword').value.trim(),
     location: document.getElementById('location').value.trim(),
-    limit: Number(document.getElementById('limit').value || 20)
+    limit: Number(document.getElementById('limit').value || 20),
+    websites: document.getElementById('websites').value.trim()
   };
 
   if (!payload.keyword || !payload.location) {
@@ -678,9 +741,10 @@ async function handleSearch(req, res) {
   const keyword = normalizeWhitespace(body.keyword || '');
   const location = normalizeWhitespace(body.location || '');
   const limit = Math.max(1, Math.min(80, Number(body.limit || 20)));
+  const manualSites = parseManualWebsites(body.websites || '').slice(0, limit);
 
-  if (!keyword || !location) {
-    return sendJson(res, 400, { error: 'keyword and location are required' });
+  if (!manualSites.length && (!keyword || !location)) {
+    return sendJson(res, 400, { error: 'keyword and location are required, unless websites are provided' });
   }
 
   res.writeHead(200, {
@@ -692,9 +756,18 @@ async function handleSearch(req, res) {
   const write = obj => res.write(JSON.stringify(obj) + '\n');
 
   try {
-    write({ type: 'status', message: 'Searching public web results...' });
-    const sites = await discoverCandidateSites(keyword, location, limit, write);
-    write({ type: 'status', message: `Found ${sites.length} candidate websites. Analyzing...` });
+    let sites = manualSites;
+    if (sites.length) {
+      write({ type: 'status', message: `Using ${sites.length} websites from manual list. Analyzing...` });
+    } else {
+      write({ type: 'status', message: 'Searching public web results...' });
+      sites = await discoverCandidateSites(keyword, location, limit, write);
+      if (!sites.length) {
+        write({ type: 'status', message: 'No candidate websites found from public search. Try a more specific keyword, or paste website URLs into the manual website list.' });
+      } else {
+        write({ type: 'status', message: `Found ${sites.length} candidate websites. Analyzing...` });
+      }
+    }
 
     let current = 0;
     for (const site of sites) {
