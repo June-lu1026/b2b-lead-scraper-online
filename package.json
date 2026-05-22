@@ -1,0 +1,14 @@
+{
+  "name": "b2b-lead-scraper-online",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Free B2B lead scraper web app. No paid API key required.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}

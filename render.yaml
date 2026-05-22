@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: b2b-lead-scraper-online
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: "npm start"
+    healthCheckPath: /health
