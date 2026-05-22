@@ -1,29 +1,33 @@
-# b2b-lead-scraper-online v2
+# b2b-lead-scraper-online v3
 
-Free online B2B lead scraper.
+免费在线版：面向骑行配件外贸，优先寻找自行车店、骑行店、配件经销商、批发商、分销商官网，并从公开页面提取邮箱和电话。
 
-- No Google Places API key needed
-- No Gemini key needed
-- Uses only built-in Node.js APIs
-- Searches public web results and extracts public emails/phones from company websites
-- v2 adds Bing fallback and manual website list mode
+## 特点
 
-## Deploy on Render
+- 不需要 Google Places API
+- 不需要 Gemini API
+- 支持 Render 在线部署
+- 支持关键词 + 地区公开搜索
+- 支持手动粘贴官网列表，一行一个
+- 增加骑行行业相关性过滤，减少 Microsoft、搜索引擎帮助页、品牌官网、无关平台结果
 
-Build Command:
+## Render 配置
 
-```bash
-npm install
-```
+- Runtime: Node
+- Build Command: 留空或 `npm install`
+- Start Command: `npm start`
+- Plan: Free
 
-Start Command:
+## 推荐关键词
 
-```bash
-npm start
-```
+- bike dealer
+- bicycle shop
+- cycling store
+- bicycle accessories distributor
+- bike parts wholesaler
+- Fahrradladen
+- Radladen
 
-No environment variables are required.
+## 使用建议
 
-## If search returns 0
-
-Public search engines may block cloud servers such as Render. Use the manual website list field: paste one website per line, then the app will directly extract emails from those websites.
+免费公开搜索源不如 Google Places 稳定。如果自动搜索不准，建议从行业协会、展会名录、Google 搜索结果、品牌经销商页面复制官网，粘贴到“官网列表”区域，工具会直接分析这些网站。
