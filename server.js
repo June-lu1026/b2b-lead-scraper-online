@@ -4,7 +4,7 @@ const http = require('http');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'v7.2 结果质量与表格修复版';
+const VERSION = 'v7.3 国家联动城市筛选版';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
@@ -32,42 +32,41 @@ const COUNTRY_PRESETS = [
   ['South Korea', 'South Korea 韩国']
 ];
 
-const CITY_PRESETS = [
-  ['', '全部城市 / 不限制'],
-  ['Berlin', 'Berlin'],
-  ['Munich', 'Munich'],
-  ['Hamburg', 'Hamburg'],
-  ['Frankfurt', 'Frankfurt'],
-  ['Paris', 'Paris'],
-  ['Lyon', 'Lyon'],
-  ['London', 'London'],
-  ['Manchester', 'Manchester'],
-  ['Milan', 'Milan'],
-  ['Rome', 'Rome'],
-  ['Madrid', 'Madrid'],
-  ['Barcelona', 'Barcelona'],
-  ['Amsterdam', 'Amsterdam'],
-  ['Brussels', 'Brussels'],
-  ['Stockholm', 'Stockholm'],
-  ['Gothenburg', 'Gothenburg'],
-  ['Malmö', 'Malmö'],
-  ['Oslo', 'Oslo'],
-  ['Copenhagen', 'Copenhagen'],
-  ['Helsinki', 'Helsinki'],
-  ['Warsaw', 'Warsaw'],
-  ['Prague', 'Prague'],
-  ['Vienna', 'Vienna'],
-  ['Zurich', 'Zurich'],
-  ['New York', 'New York'],
-  ['Los Angeles', 'Los Angeles'],
-  ['Chicago', 'Chicago'],
-  ['Toronto', 'Toronto'],
-  ['Vancouver', 'Vancouver'],
-  ['Sydney', 'Sydney'],
-  ['Melbourne', 'Melbourne'],
-  ['Tokyo', 'Tokyo'],
-  ['Seoul', 'Seoul']
-];
+const CITY_BY_COUNTRY = {
+  '': [
+    ['', '全部城市 / 不限制']
+  ],
+  'Germany': [['','全部城市 / 不限制'], ['Berlin','Berlin'], ['Munich','Munich'], ['Hamburg','Hamburg'], ['Frankfurt','Frankfurt'], ['Cologne','Cologne'], ['Stuttgart','Stuttgart'], ['Dusseldorf','Dusseldorf']],
+  'France': [['','全部城市 / 不限制'], ['Paris','Paris'], ['Lyon','Lyon'], ['Marseille','Marseille'], ['Bordeaux','Bordeaux'], ['Toulouse','Toulouse'], ['Nice','Nice'], ['Lille','Lille']],
+  'United Kingdom': [['','全部城市 / 不限制'], ['London','London'], ['Manchester','Manchester'], ['Birmingham','Birmingham'], ['Bristol','Bristol'], ['Glasgow','Glasgow'], ['Edinburgh','Edinburgh'], ['Leeds','Leeds']],
+  'Italy': [['','全部城市 / 不限制'], ['Milan','Milan'], ['Rome','Rome'], ['Turin','Turin'], ['Bologna','Bologna'], ['Florence','Florence'], ['Naples','Naples']],
+  'Spain': [['','全部城市 / 不限制'], ['Madrid','Madrid'], ['Barcelona','Barcelona'], ['Valencia','Valencia'], ['Seville','Seville'], ['Bilbao','Bilbao']],
+  'Netherlands': [['','全部城市 / 不限制'], ['Amsterdam','Amsterdam'], ['Rotterdam','Rotterdam'], ['Utrecht','Utrecht'], ['Eindhoven','Eindhoven'], ['The Hague','The Hague']],
+  'Belgium': [['','全部城市 / 不限制'], ['Brussels','Brussels'], ['Antwerp','Antwerp'], ['Ghent','Ghent'], ['Bruges','Bruges']],
+  'Sweden': [['','全部城市 / 不限制'], ['Stockholm','Stockholm'], ['Gothenburg','Gothenburg'], ['Malmö','Malmö'], ['Uppsala','Uppsala']],
+  'Norway': [['','全部城市 / 不限制'], ['Oslo','Oslo'], ['Bergen','Bergen'], ['Trondheim','Trondheim'], ['Stavanger','Stavanger']],
+  'Denmark': [['','全部城市 / 不限制'], ['Copenhagen','Copenhagen'], ['Aarhus','Aarhus'], ['Odense','Odense']],
+  'Finland': [['','全部城市 / 不限制'], ['Helsinki','Helsinki'], ['Tampere','Tampere'], ['Turku','Turku']],
+  'Poland': [['','全部城市 / 不限制'], ['Warsaw','Warsaw'], ['Krakow','Krakow'], ['Wroclaw','Wroclaw'], ['Poznan','Poznan'], ['Gdansk','Gdansk']],
+  'Czech Republic': [['','全部城市 / 不限制'], ['Prague','Prague'], ['Brno','Brno'], ['Ostrava','Ostrava']],
+  'Austria': [['','全部城市 / 不限制'], ['Vienna','Vienna'], ['Graz','Graz'], ['Salzburg','Salzburg'], ['Innsbruck','Innsbruck']],
+  'Switzerland': [['','全部城市 / 不限制'], ['Zurich','Zurich'], ['Geneva','Geneva'], ['Basel','Basel'], ['Bern','Bern'], ['Lausanne','Lausanne']],
+  'USA': [['','全部城市 / 不限制'], ['New York','New York'], ['Los Angeles','Los Angeles'], ['Chicago','Chicago'], ['San Francisco','San Francisco'], ['Miami','Miami'], ['Seattle','Seattle'], ['Austin','Austin'], ['Denver','Denver'], ['Portland','Portland'], ['Boston','Boston']],
+  'Canada': [['','全部城市 / 不限制'], ['Toronto','Toronto'], ['Vancouver','Vancouver'], ['Montreal','Montreal'], ['Calgary','Calgary'], ['Ottawa','Ottawa']],
+  'Australia': [['','全部城市 / 不限制'], ['Sydney','Sydney'], ['Melbourne','Melbourne'], ['Brisbane','Brisbane'], ['Perth','Perth'], ['Adelaide','Adelaide']],
+  'Japan': [['','全部城市 / 不限制'], ['Tokyo','Tokyo'], ['Osaka','Osaka'], ['Kyoto','Kyoto'], ['Yokohama','Yokohama'], ['Nagoya','Nagoya'], ['Fukuoka','Fukuoka']],
+  'South Korea': [['','全部城市 / 不限制'], ['Seoul','Seoul'], ['Busan','Busan'], ['Incheon','Incheon'], ['Daegu','Daegu']]
+};
+
+function cityOptionsForCountry(country='') {
+  return CITY_BY_COUNTRY[country] || CITY_BY_COUNTRY[''];
+}
+
+function normalizeCityForCountry(country='', city='') {
+  const opts = cityOptionsForCountry(country).map(([v]) => v);
+  return opts.includes(city) ? city : '';
+}
+
 
 const TLD_BY_COUNTRY = {
   'germany':['.de'], 'france':['.fr'], 'united kingdom':['.uk','.co.uk'], 'uk':['.uk','.co.uk'], 'italy':['.it'],
@@ -550,20 +549,22 @@ async function runSearch(p) {
 function formValue(q, k, def='') { return q.get(k) ?? def; }
 function paramsFromUrl(urlObj) {
   const q = urlObj.searchParams;
+  const country = formValue(q,'country','Germany');
+  const city = normalizeCityForCountry(country, formValue(q,'city','Berlin'));
   return {
     urls: formValue(q,'urls',''),
     type: formValue(q,'type','all'),
     countryMode: formValue(q,'countryMode','strict'),
-    country: formValue(q,'country','Germany'),
+    country,
     cityMode: formValue(q,'cityMode','prefer'),
-    city: formValue(q,'city','Berlin'),
+    city,
     target: Math.min(Math.max(parseInt(formValue(q,'target','10'),10) || 10, 1), 30),
     keyword: formValue(q,'keyword','bike shop'),
     product: formValue(q,'product','bike parts, cycling accessories, power meter, crankset'),
     required: formValue(q,'required','bike,bicycle,cycling,shop,dealer,distributor,parts'),
-    exclude: formValue(q,'exclude','microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine,pdf,download,manual,brochure,walmart,rei,giant,trek,specialized'),
-    minScore: parseInt(formValue(q,'minScore','0'),10) || 0,
-    minMatch: parseInt(formValue(q,'minMatch','0'),10) || 0,
+    exclude: formValue(q,'exclude','microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine,pdf,download,manual,brochure,walmart,rei,giant,trek,specialized,hotel,booking,trivago,tripadvisor,dicks,zigwheels,buycycle,marketplace,used'),
+    minScore: parseInt(formValue(q,'minScore','20'),10) || 0,
+    minMatch: parseInt(formValue(q,'minMatch','20'),10) || 0,
     onlyEmail: q.get('onlyEmail') === 'on',
     onlyPhone: q.get('onlyPhone') === 'on',
     sort: formValue(q,'sort','score')
@@ -638,20 +639,20 @@ button,.btn{border:0;border-radius:12px;padding:14px 22px;background:#0f172a;col
 
       <div class="region">
         <h2>地区筛选</h2>
-        <p class="small">这里是单选筛选，不做多选。一次只跑一个国家/市场和一个城市/地区，结果更清楚，也更适合按市场分批开发。</p>
+        <p class="small">这里是单选筛选，不做多选。一次只跑一个国家/市场和一个城市/地区。选择国家后，城市下拉框会自动切换到该国家常用城市，避免 France + Berlin 这类不匹配组合。</p>
         <div class="grid">
           <div><label>国家/市场筛选模式</label><select name="countryMode">
             <option value="none" ${selected(p.countryMode,'none')}>不限制国家</option>
             <option value="prefer" ${selected(p.countryMode,'prefer')}>国家相关优先</option>
             <option value="strict" ${selected(p.countryMode,'strict')}>严格匹配国家</option>
           </select></div>
-          <div><label>国家/市场，单选</label><select name="country">${COUNTRY_PRESETS.map(([v,l])=>`<option value="${esc(v)}" ${selected(p.country,v)}>${esc(l)}</option>`).join('')}</select></div>
+          <div><label>国家/市场，单选</label><select id="countrySelect" name="country">${COUNTRY_PRESETS.map(([v,l])=>`<option value="${esc(v)}" ${selected(p.country,v)}>${esc(l)}</option>`).join('')}</select></div>
           <div><label>城市/地区筛选模式</label><select name="cityMode">
             <option value="none" ${selected(p.cityMode,'none')}>不限制城市</option>
             <option value="prefer" ${selected(p.cityMode,'prefer')}>城市相关优先</option>
             <option value="strict" ${selected(p.cityMode,'strict')}>严格匹配城市</option>
           </select></div>
-          <div><label>城市/地区，单选</label><select name="city">${CITY_PRESETS.map(([v,l])=>`<option value="${esc(v)}" ${selected(p.city,v)}>${esc(l)}</option>`).join('')}</select></div>
+          <div><label>城市/地区，单选</label><select id="citySelect" name="city">${cityOptionsForCountry(p.country).map(([v,l])=>`<option value="${esc(v)}" ${selected(p.city,v)}>${esc(l)}</option>`).join('')}</select></div>
         </div>
       </div>
 
@@ -691,6 +692,30 @@ button,.btn{border:0;border-radius:12px;padding:14px 22px;background:#0f172a;col
     </table></div>
   </div>
 </div>
+
+<script>
+(function(){
+  const cityByCountry = ${JSON.stringify(CITY_BY_COUNTRY)};
+  const countrySelect = document.getElementById('countrySelect');
+  const citySelect = document.getElementById('citySelect');
+  if (!countrySelect || !citySelect) return;
+  function rebuildCities() {
+    const selectedCity = citySelect.value;
+    const list = cityByCountry[countrySelect.value] || cityByCountry[''] || [['','全部城市 / 不限制']];
+    citySelect.innerHTML = '';
+    for (const pair of list) {
+      const opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      citySelect.appendChild(opt);
+    }
+    if ([...citySelect.options].some(o => o.value === selectedCity)) citySelect.value = selectedCity;
+    else citySelect.value = '';
+  }
+  countrySelect.addEventListener('change', rebuildCities);
+})();
+</script>
+
 </body>
 </html>`;
 }
