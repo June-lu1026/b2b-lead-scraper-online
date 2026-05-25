@@ -1,1 +1,14 @@
-{"scripts":{"start":"node server.js"},"dependencies":{},"engines":{"node":">=18"},"name":"b2b-lead-scraper-online","version":"5.2.0","private":true}
+{
+  "name": "b2b-lead-scraper-online",
+  "version": "6.2.0",
+  "description": "Global cycling accessories B2B lead scraper - no external npm dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
