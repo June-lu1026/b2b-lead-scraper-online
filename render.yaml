@@ -3,6 +3,5 @@ services:
     name: b2b-lead-scraper-online
     env: node
     plan: free
-    buildCommand: ""
-    startCommand: "npm start"
-    healthCheckPath: /health
+    buildCommand: npm install
+    startCommand: npm start
