@@ -1,4 +1,4 @@
-# 骑行配件 B2B 线索采集工具 v5.1 修复版
+# 骑行配件 B2B 线索采集工具 v5.2 修复版
 
 修复 v5 的 `SyntaxError: Unexpected token '<'` 部署失败问题。
 
