@@ -2,402 +2,704 @@
 
 const http = require('http');
 const { URL } = require('url');
-const querystring = require('querystring');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'v7.0 单选筛选稳定版';
+const VERSION = 'v7.1 搜索修复版';
 
-let LAST_RESULTS = [];
-let LAST_CSV_NAME = 'global-cycling-b2b-leads.csv';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
-const COUNTRY_OPTIONS = [
-  ['ALL','全球 / 不限制'], ['Germany','Germany 德国'], ['France','France 法国'], ['United Kingdom','United Kingdom 英国'],
-  ['Italy','Italy 意大利'], ['Spain','Spain 西班牙'], ['Netherlands','Netherlands 荷兰'], ['Belgium','Belgium 比利时'],
-  ['Switzerland','Switzerland 瑞士'], ['Austria','Austria 奥地利'], ['Denmark','Denmark 丹麦'], ['Sweden','Sweden 瑞典'],
-  ['Norway','Norway 挪威'], ['Finland','Finland 芬兰'], ['Poland','Poland 波兰'], ['Czech Republic','Czech Republic 捷克'],
-  ['USA','USA 美国'], ['Canada','Canada 加拿大'], ['Mexico','Mexico 墨西哥'], ['Brazil','Brazil 巴西'],
-  ['Australia','Australia 澳大利亚'], ['New Zealand','New Zealand 新西兰'], ['Japan','Japan 日本'], ['South Korea','South Korea 韩国'],
-  ['Singapore','Singapore 新加坡'], ['Thailand','Thailand 泰国'], ['UAE','UAE 阿联酋'], ['South Africa','South Africa 南非']
+const COUNTRY_PRESETS = [
+  ['', '全部国家 / 不限制'],
+  ['Germany', 'Germany 德国'],
+  ['France', 'France 法国'],
+  ['United Kingdom', 'United Kingdom 英国'],
+  ['Italy', 'Italy 意大利'],
+  ['Spain', 'Spain 西班牙'],
+  ['Netherlands', 'Netherlands 荷兰'],
+  ['Belgium', 'Belgium 比利时'],
+  ['Sweden', 'Sweden 瑞典'],
+  ['Norway', 'Norway 挪威'],
+  ['Denmark', 'Denmark 丹麦'],
+  ['Finland', 'Finland 芬兰'],
+  ['Poland', 'Poland 波兰'],
+  ['Czech Republic', 'Czech Republic 捷克'],
+  ['Austria', 'Austria 奥地利'],
+  ['Switzerland', 'Switzerland 瑞士'],
+  ['USA', 'USA 美国'],
+  ['Canada', 'Canada 加拿大'],
+  ['Australia', 'Australia 澳大利亚'],
+  ['Japan', 'Japan 日本'],
+  ['South Korea', 'South Korea 韩国']
 ];
 
-const CITY_OPTIONS = [
-  ['ALL','全部城市 / 不限制'], ['Berlin','Berlin'], ['Munich','Munich'], ['Hamburg','Hamburg'], ['Frankfurt','Frankfurt'],
-  ['Paris','Paris'], ['Lyon','Lyon'], ['London','London'], ['Manchester','Manchester'], ['Milan','Milan'], ['Rome','Rome'],
-  ['Madrid','Madrid'], ['Barcelona','Barcelona'], ['Amsterdam','Amsterdam'], ['Rotterdam','Rotterdam'], ['Brussels','Brussels'],
-  ['Zurich','Zurich'], ['Vienna','Vienna'], ['Copenhagen','Copenhagen'], ['Stockholm','Stockholm'], ['Oslo','Oslo'],
-  ['New York','New York'], ['Los Angeles','Los Angeles'], ['San Francisco','San Francisco'], ['Chicago','Chicago'], ['Seattle','Seattle'],
-  ['Toronto','Toronto'], ['Vancouver','Vancouver'], ['Montreal','Montreal'], ['Sydney','Sydney'], ['Melbourne','Melbourne'],
-  ['Tokyo','Tokyo'], ['Osaka','Osaka'], ['Seoul','Seoul'], ['Singapore','Singapore'], ['Bangkok','Bangkok'], ['Dubai','Dubai']
+const CITY_PRESETS = [
+  ['', '全部城市 / 不限制'],
+  ['Berlin', 'Berlin'],
+  ['Munich', 'Munich'],
+  ['Hamburg', 'Hamburg'],
+  ['Frankfurt', 'Frankfurt'],
+  ['Paris', 'Paris'],
+  ['Lyon', 'Lyon'],
+  ['London', 'London'],
+  ['Manchester', 'Manchester'],
+  ['Milan', 'Milan'],
+  ['Rome', 'Rome'],
+  ['Madrid', 'Madrid'],
+  ['Barcelona', 'Barcelona'],
+  ['Amsterdam', 'Amsterdam'],
+  ['Brussels', 'Brussels'],
+  ['Stockholm', 'Stockholm'],
+  ['Gothenburg', 'Gothenburg'],
+  ['Malmö', 'Malmö'],
+  ['Oslo', 'Oslo'],
+  ['Copenhagen', 'Copenhagen'],
+  ['Helsinki', 'Helsinki'],
+  ['Warsaw', 'Warsaw'],
+  ['Prague', 'Prague'],
+  ['Vienna', 'Vienna'],
+  ['Zurich', 'Zurich'],
+  ['New York', 'New York'],
+  ['Los Angeles', 'Los Angeles'],
+  ['Chicago', 'Chicago'],
+  ['Toronto', 'Toronto'],
+  ['Vancouver', 'Vancouver'],
+  ['Sydney', 'Sydney'],
+  ['Melbourne', 'Melbourne'],
+  ['Tokyo', 'Tokyo'],
+  ['Seoul', 'Seoul']
 ];
 
-const COUNTRY_SYNONYMS = {
-  Germany: ['germany','deutschland','.de','german'], France: ['france','.fr','french'],
-  'United Kingdom': ['united kingdom','uk','britain','england','.co.uk'], Italy: ['italy','italia','.it'],
-  Spain: ['spain','espana','españa','.es'], Netherlands: ['netherlands','holland','.nl'], Belgium: ['belgium','.be'],
-  Switzerland: ['switzerland','schweiz','suisse','.ch'], Austria: ['austria','osterreich','österreich','.at'],
-  Denmark: ['denmark','danmark','.dk'], Sweden: ['sweden','sverige','.se'], Norway: ['norway','norge','.no'], Finland: ['finland','.fi'],
-  Poland: ['poland','polska','.pl'], 'Czech Republic': ['czech','czech republic','cesko','.cz'], USA: ['usa','united states','america','u.s.'],
-  Canada: ['canada','.ca'], Mexico: ['mexico','.mx'], Brazil: ['brazil','brasil','.br'], Australia: ['australia','.au'],
-  'New Zealand': ['new zealand','.nz'], Japan: ['japan','日本','.jp'], 'South Korea': ['south korea','korea','한국','.kr'],
-  Singapore: ['singapore','.sg'], Thailand: ['thailand','.th'], UAE: ['uae','dubai','united arab emirates','.ae'],
-  'South Africa': ['south africa','.za']
+const TLD_BY_COUNTRY = {
+  'germany':['.de'], 'france':['.fr'], 'united kingdom':['.uk','.co.uk'], 'uk':['.uk','.co.uk'], 'italy':['.it'],
+  'spain':['.es'], 'netherlands':['.nl'], 'belgium':['.be'], 'sweden':['.se'], 'norway':['.no'], 'denmark':['.dk'],
+  'finland':['.fi'], 'poland':['.pl'], 'czech republic':['.cz'], 'austria':['.at'], 'switzerland':['.ch'],
+  'usa':['.com','.us'], 'canada':['.ca'], 'australia':['.au','.com.au'], 'japan':['.jp'], 'south korea':['.kr']
 };
 
-const TYPE_TERMS = {
-  all: ['bike','bicycle','cycling','cycle','fahrrad','velo'],
-  shop: ['bike shop','bicycle shop','cycling store','bike store','fahrradladen','radladen','cycle shop'],
-  dealer: ['dealer','bike dealer','bicycle dealer','fahrrad händler','haendler','reseller'],
-  distributor: ['distributor','distribution','distributeur','distribuidor','importer','wholesale','wholesaler'],
-  service: ['bike repair','workshop','service center','fahrradwerkstatt']
+const LOCAL_TERMS = {
+  'germany': ['fahrradladen','fahrrad händler','fahrradteile händler','radladen','bike shop'],
+  'france': ['magasin vélo','boutique vélo','revendeur vélo','pièces vélo','bike shop'],
+  'united kingdom': ['bike shop','cycle shop','bicycle dealer','bike parts dealer'],
+  'uk': ['bike shop','cycle shop','bicycle dealer','bike parts dealer'],
+  'italy': ['negozio bici','negozio biciclette','rivenditore bici','componenti bici'],
+  'spain': ['tienda bicicletas','tienda ciclismo','distribuidor bicicletas','componentes bicicleta'],
+  'netherlands': ['fietsenwinkel','fiets dealer','fiets onderdelen','bike shop'],
+  'belgium': ['fietsenwinkel','magasin vélo','bike shop'],
+  'sweden': ['cykelbutik','cykelaffär','cykelhandlare','cykeldelar','cykelverkstad','bike shop'],
+  'norway': ['sykkelbutikk','sykkel deler','sykkelforhandler','bike shop'],
+  'denmark': ['cykelbutik','cykelforhandler','cykeldele','bike shop'],
+  'finland': ['pyöräliike','pyöräkauppa','bike shop'],
+  'poland': ['sklep rowerowy','części rowerowe','dystrybutor rowerów'],
+  'czech republic': ['prodejna kol','cyklo obchod','bike shop'],
+  'austria': ['fahrradladen','fahrrad händler','bike shop'],
+  'switzerland': ['fahrradladen','velogeschäft','bike shop'],
+  'usa': ['bike shop','bicycle shop','bike dealer','bike parts distributor'],
+  'canada': ['bike shop','bicycle shop','bike dealer','bike parts distributor'],
+  'australia': ['bike shop','bicycle shop','bike dealer','bike parts distributor'],
+  'japan': ['自転車 店','サイクルショップ','自転車 パーツ','bike shop'],
+  'south korea': ['자전거 매장','자전거 부품','bike shop']
 };
 
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-function arr(v) {
-  if (Array.isArray(v)) return v.filter(Boolean);
-  if (!v) return [];
-  return [v].filter(Boolean);
-}
-function splitWords(s) {
-  return String(s || '').split(/[\n,;|]+/).map(x => x.trim()).filter(Boolean);
-}
-function normalizeUrl(raw) {
-  let s = String(raw || '').trim();
-  if (!s) return '';
-  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
-  try { return new URL(s).toString(); } catch { return ''; }
-}
-function domainFromUrl(raw) {
-  try { return new URL(raw).hostname.replace(/^www\./,''); } catch { return ''; }
-}
-function textLower(...parts) { return parts.join(' ').toLowerCase(); }
-function stripTags(html) { return String(html || '').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' '); }
-function decodeHtml(s) { return String(s || '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'"); }
-function uniq(a) { return Array.from(new Set(a.filter(Boolean))); }
+const HARD_EXCLUDE = [
+  'microsoft.com','bing.com','google.com','facebook.com','instagram.com','youtube.com','youtu.be','x.com','twitter.com',
+  'linkedin.com','wikipedia.org','reddit.com','quora.com','pinterest.','amazon.','ebay.','aliexpress.','alibaba.',
+  'cyclingnews.com','bikeradar.com','road.cc','pinkbike.com','singletracks.com','bikepacking.com',
+  'help.','support.','privacy policy','terms of service'
+];
 
-async function fetchText(url, timeoutMs = 8000) {
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_RE = /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,5}\)?[\s.-]?){2,5}\d{2,5}/g;
+
+function esc(s='') {
+  return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function lower(s='') { return String(s||'').toLowerCase(); }
+function splitCSV(s='') {
+  return String(s||'').split(',').map(x => x.trim()).filter(Boolean);
+}
+function uniq(arr) { return [...new Set(arr.filter(Boolean))]; }
+function normalizeUrl(u='') {
+  u = String(u || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try {
+    const url = new URL(u);
+    url.hash = '';
+    return url.toString();
+  } catch { return ''; }
+}
+function domainFromUrl(u='') {
+  try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; }
+}
+function isBadCandidate(url, title, excludes) {
+  const blob = lower(url + ' ' + title);
+  const list = [...HARD_EXCLUDE, ...excludes.map(x => lower(x))];
+  return list.some(x => x && blob.includes(x));
+}
+function countryKey(c='') { return lower(c).replace(/\s+/g,' ').trim(); }
+function countryAliases(country='') {
+  const c = countryKey(country);
+  const map = {
+    'usa':['usa','united states','america','us'],
+    'united kingdom':['united kingdom','uk','great britain','england'],
+    'south korea':['south korea','korea','kr'],
+    'czech republic':['czech republic','czechia'],
+    'germany':['germany','deutschland'],
+    'france':['france','français'],
+    'sweden':['sweden','sverige'],
+    'norway':['norway','norge'],
+    'denmark':['denmark','danmark'],
+    'finland':['finland','suomi'],
+    'japan':['japan','日本']
+  };
+  return map[c] || (c ? [c] : []);
+}
+function regionMatch(url, title, text, country, city) {
+  const blob = lower([url,title,text].join(' '));
+  const host = lower(domainFromUrl(url));
+  let countryHit = !country;
+  let cityHit = !city;
+  if (country) {
+    const aliases = countryAliases(country);
+    const tlds = TLD_BY_COUNTRY[countryKey(country)] || [];
+    countryHit = aliases.some(a => blob.includes(a)) || tlds.some(t => host.endsWith(t));
+  }
+  if (city) cityHit = blob.includes(lower(city));
+  return {countryHit, cityHit};
+}
+function labelType(type) {
+  const m = {
+    all:'全部类型', shop:'自行车店/门店', dealer:'经销商 Dealer',
+    distributor:'分销商 Distributor', wholesale:'批发商 Wholesale',
+    importer:'进口商 Importer', service:'维修店/服务商'
+  };
+  return m[type] || '全部类型';
+}
+
+function buildQueries(p) {
+  const country = p.country || '';
+  const city = p.city || '';
+  const main = p.keyword || 'bike shop';
+  const product = p.product || '';
+  const type = p.type || 'all';
+  const typeTerms = {
+    shop:['bike shop','bicycle shop','cycling store'],
+    dealer:['bike dealer','bicycle dealer','cycling dealer'],
+    distributor:['bike parts distributor','bicycle parts distributor','cycling distributor'],
+    wholesale:['bike parts wholesale','cycling accessories wholesale','bicycle wholesale'],
+    importer:['bike parts importer','bicycle importer','cycling importer'],
+    service:['bike repair shop','bicycle service shop'],
+    all:[main]
+  }[type] || [main];
+
+  const loc = [city, country].filter(Boolean).join(' ');
+  const local = LOCAL_TERMS[countryKey(country)] || [];
+  const queries = [];
+
+  // Important: search query is intentionally short. Product tags are for scoring, not for making the search too long.
+  queries.push([main, loc].filter(Boolean).join(' '));
+  for (const t of typeTerms) queries.push([t, loc].filter(Boolean).join(' '));
+  for (const t of local.slice(0,4)) queries.push([t, loc].filter(Boolean).join(' '));
+
+  if (product && type !== 'shop') {
+    const firstProduct = splitCSV(product)[0] || product.split(/\s+/).slice(0,2).join(' ');
+    queries.push([firstProduct, typeTerms[0] || main, country].filter(Boolean).join(' '));
+  }
+  return uniq(queries).slice(0,8);
+}
+
+async function fetchText(url, timeoutMs=7000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { 'user-agent': 'Mozilla/5.0 LeadResearchBot/1.0', 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' } });
-    const txt = await res.text();
-    return { ok: res.ok, status: res.status, text: txt.slice(0, 700000) };
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8' }
+    });
+    if (!res.ok) return {ok:false, status:res.status, text:''};
+    const text = await res.text();
+    return {ok:true, status:res.status, text};
   } catch (e) {
-    return { ok: false, status: 0, text: '', error: e.name || e.message };
-  } finally { clearTimeout(timer); }
-}
-
-function isExcluded(item, excludes) {
-  const hay = textLower(item.url, item.title, item.snippet || '');
-  return excludes.some(x => x && hay.includes(x.toLowerCase()));
-}
-
-function isRegionMatch(item, countries, cities) {
-  const hay = textLower(item.url, item.title, item.snippet || '', item.htmlText || '');
-  let countryOk = countries.length === 0 || countries.includes('ALL');
-  if (!countryOk) {
-    countryOk = countries.some(c => (COUNTRY_SYNONYMS[c] || [c]).some(t => hay.includes(t.toLowerCase())));
+    return {ok:false, status:0, text:'', error:String(e && e.message || e)};
+  } finally {
+    clearTimeout(timer);
   }
-  let cityOk = cities.length === 0 || cities.includes('ALL');
-  if (!cityOk) cityOk = cities.some(c => hay.includes(c.toLowerCase()));
-  return { countryOk, cityOk, both: countryOk && cityOk };
 }
 
-function labelType(scoreText) {
-  const t = scoreText.toLowerCase();
-  if (/distributor|wholesale|wholesaler|importer|distribution|grosshandel/.test(t)) return '分销/批发/进口商';
-  if (/dealer|reseller|händler|haendler/.test(t)) return '经销商/Dealer';
-  if (/repair|workshop|service|werkstatt/.test(t)) return '维修/服务店';
-  if (/shop|store|laden|radladen/.test(t)) return '自行车店/门店';
-  return '待判断';
+function decodeEntities(s='') {
+  return String(s)
+    .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+    .replace(/&quot;/g,'"').replace(/&#39;/g,"'");
 }
 
-async function searchBingRss(q) {
-  const url = 'https://www.bing.com/search?format=rss&q=' + encodeURIComponent(q);
-  const r = await fetchText(url, 7000);
-  const items = [];
-  if (!r.text) return items;
-  const re = /<item>[\s\S]*?<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>[\s\S]*?<link>([\s\S]*?)<\/link>[\s\S]*?(?:<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>)?[\s\S]*?<\/item>/gi;
+function extractSearchCandidatesFromBingRSS(xml) {
+  const out = [];
+  const itemRe = /<item\b[\s\S]*?<\/item>/gi;
   let m;
-  while ((m = re.exec(r.text))) {
-    items.push({ title: decodeHtml(m[1] || ''), url: decodeHtml(m[2] || ''), snippet: stripTags(decodeHtml(m[3] || '')) });
+  while ((m = itemRe.exec(xml))) {
+    const item = m[0];
+    const title = decodeEntities((item.match(/<title>([\s\S]*?)<\/title>/i)||[])[1] || '');
+    let link = decodeEntities((item.match(/<link>([\s\S]*?)<\/link>/i)||[])[1] || '');
+    if (link && /^https?:\/\//i.test(link)) out.push({title, url:link, source:'bing-rss'});
   }
-  return items;
+  return out;
 }
-async function searchDuckDuckGo(q) {
-  const url = 'https://duckduckgo.com/html/?q=' + encodeURIComponent(q);
-  const r = await fetchText(url, 8000);
-  const items = [];
-  if (!r.text) return items;
-  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+
+function extractSearchCandidatesFromDuck(html) {
+  const out = [];
+  const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = re.exec(r.text))) {
-    let href = decodeHtml(m[1]);
+  while ((m = re.exec(html))) {
+    let href = decodeEntities(m[1]);
+    let title = decodeEntities(m[2].replace(/<[^>]+>/g,' ')).replace(/\s+/g,' ').trim();
     try {
       const u = new URL(href, 'https://duckduckgo.com');
-      if (u.searchParams.get('uddg')) href = u.searchParams.get('uddg');
+      if (u.searchParams.get('uddg')) href = decodeURIComponent(u.searchParams.get('uddg'));
     } catch {}
-    items.push({ title: stripTags(decodeHtml(m[2] || '')), url: href, snippet: '' });
+    if (/^https?:\/\//i.test(href)) out.push({title, url:href, source:'duckduckgo'});
   }
-  return items;
+  return out;
 }
 
-function buildQueries(form) {
-  const countries = form.countries;
-  const cities = form.cities;
-  const keyword = form.keyword || 'bike shop';
-  const product = form.product || 'bike parts';
-  const typeTerms = TYPE_TERMS[form.customerType] || TYPE_TERMS.all;
-  const countryText = countries.filter(x => x !== 'ALL').join(' ');
-  const cityText = cities.filter(x => x !== 'ALL').join(' ');
-  const regionText = [cityText, countryText].filter(Boolean).join(' ');
-  const base = [keyword, product, regionText].filter(Boolean).join(' ');
-  const queries = [base];
-  typeTerms.slice(0, 4).forEach(t => queries.push([t, product, regionText].filter(Boolean).join(' ')));
-  return uniq(queries).slice(0, 5);
+async function searchWeb(query, diag) {
+  const all = [];
+  const encoded = encodeURIComponent(query);
+  const sources = [
+    {name:'bing-rss', url:`https://www.bing.com/search?format=rss&q=${encoded}`},
+    {name:'duckduckgo', url:`https://duckduckgo.com/html/?q=${encoded}`}
+  ];
+  for (const src of sources) {
+    const r = await fetchText(src.url, 7000);
+    diag.sourceAttempts.push({source:src.name, query, ok:r.ok, status:r.status, bytes:r.text ? r.text.length : 0});
+    if (!r.ok || !r.text) continue;
+    if (src.name === 'bing-rss') all.push(...extractSearchCandidatesFromBingRSS(r.text));
+    else all.push(...extractSearchCandidatesFromDuck(r.text));
+  }
+  return all;
 }
 
-function extractEmails(text) {
-  const matches = String(text || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-  return uniq(matches.map(e => e.toLowerCase()).filter(e => !/\.(png|jpg|jpeg|gif|svg|webp)$/i.test(e)));
-}
-function extractPhones(text) {
-  const matches = String(text || '').match(/(?:\+|00)?\d[\d\s().-]{7,}\d/g) || [];
-  return uniq(matches.map(x => x.replace(/\s+/g,' ').trim()).filter(x => x.replace(/\D/g,'').length >= 8)).slice(0, 4);
-}
-function pickPriorityEmail(emails) {
-  const priority = ['sales@','wholesale@','dealer@','distribution@','distributor@','export@','info@','contact@','hello@','service@'];
-  for (const p of priority) {
-    const hit = emails.find(e => e.startsWith(p));
-    if (hit) return hit;
-  }
-  return emails[0] || '';
-}
-function contactLinks(baseUrl, html) {
+function extractRelevantLinks(baseUrl, html) {
   const links = [];
-  const re = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = re.exec(html || ''))) {
-    const href = decodeHtml(m[1]);
-    const label = stripTags(decodeHtml(m[2] || '')).toLowerCase();
-    const target = (href + ' ' + label).toLowerCase();
-    if (/contact|about|impressum|dealer|wholesale|distribution|distributor|store|shop|service|kontakt|über|ueber/.test(target)) {
-      try { links.push(new URL(href, baseUrl).toString()); } catch {}
+  while ((m = re.exec(html))) {
+    const href = decodeEntities(m[1]);
+    const label = decodeEntities(m[2].replace(/<[^>]+>/g,' ')).toLowerCase();
+    const blob = (href + ' ' + label).toLowerCase();
+    if (/(contact|about|impressum|dealer|wholesale|distributor|retailer|store|location|team|support|kontakt|händler|handler|butik|affär|kontakt)/i.test(blob)) {
+      try {
+        const u = new URL(href, baseUrl);
+        if (u.protocol.startsWith('http')) {
+          u.hash = '';
+          links.push(u.toString());
+        }
+      } catch {}
     }
   }
-  return uniq(links).slice(0, 4);
-}
-function scoreLead(item, pageText, emails, phones, form) {
-  const hay = textLower(item.url, item.title, item.snippet, pageText);
-  let score = 0;
-  let match = 0;
-  const positive = splitWords(form.mustInclude).concat(TYPE_TERMS[form.customerType] || TYPE_TERMS.all);
-  positive.forEach(w => { if (hay.includes(w.toLowerCase())) { score += 6; match += 5; } });
-  splitWords(form.product).forEach(w => { if (hay.includes(w.toLowerCase())) { score += 4; match += 3; } });
-  if (emails.length) score += 25;
-  if (phones.length) score += 10;
-  const reg = isRegionMatch({ ...item, htmlText: pageText }, form.countries, form.cities);
-  if (reg.countryOk && !(form.countries.includes('ALL') || !form.countries.length)) { score += 8; match += 8; }
-  if (reg.cityOk && !(form.cities.includes('ALL') || !form.cities.length)) { score += 8; match += 8; }
-  return { score: Math.min(100, score), match: Math.min(100, match), region: reg };
+  return uniq(links).slice(0,4);
 }
 
-async function analyzeUrl(item, form) {
-  const url = normalizeUrl(item.url);
-  const domain = domainFromUrl(url);
-  const home = await fetchText(url, 7000);
-  let combined = [item.title, item.snippet, domain, home.text].join(' ');
-  let emails = extractEmails(combined);
-  let phones = extractPhones(combined);
+function cleanHtmlText(html) {
+  return html.replace(/<script[\s\S]*?<\/script>/gi,' ')
+    .replace(/<style[\s\S]*?<\/style>/gi,' ')
+    .replace(/<[^>]+>/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+function choosePriorityEmail(emails) {
+  const good = ['sales@','wholesale@','dealer@','distributor@','export@','b2b@','order@','info@','contact@','hello@'];
+  const bad = ['privacy@','abuse@','noreply@','no-reply@','support@','webmaster@'];
+  const sorted = [...emails].sort((a,b) => {
+    const la = lower(a), lb = lower(b);
+    const sa = good.findIndex(g => la.includes(g));
+    const sb = good.findIndex(g => lb.includes(g));
+    const ba = bad.some(x => la.includes(x)) ? 1 : 0;
+    const bb = bad.some(x => lb.includes(x)) ? 1 : 0;
+    return (ba-bb) || ((sa < 0 ? 999 : sa) - (sb < 0 ? 999 : sb));
+  });
+  return sorted[0] || '';
+}
+
+function scoreLead({url,title,text,emails,phones,p}) {
+  const blob = lower([url,title,text].join(' '));
+  const required = splitCSV(p.required);
+  const product = splitCSV(p.product);
+  const type = p.type || 'all';
+
+  let score = 0, match = 0;
+  const tags = [];
+
+  if (emails.length) { score += 30; tags.push('email'); }
+  if (phones.length) { score += 10; tags.push('phone'); }
+
+  const positive = ['bike','bicycle','cycling','cycle','fahrrad','rad','cykel','fiets','vélo','velo','bicicleta','bici','parts','accessories','shop','store','dealer','distributor','wholesale','retail','butik','händler','handler','handlare'];
+  for (const w of positive) if (blob.includes(w)) { match += 5; score += 2; }
+
+  for (const w of required) if (blob.includes(lower(w))) { match += 8; score += 3; }
+  for (const w of product) if (blob.includes(lower(w))) { match += 5; score += 2; }
+
+  const typeWords = {
+    shop:['shop','store','retail','laden','butik','affär','winkel','magasin'],
+    dealer:['dealer','händler','handler','handlare','revendeur','rivenditore'],
+    distributor:['distributor','distribution','distribuidor','distributeur'],
+    wholesale:['wholesale','wholesaler','grossist','großhandel','gros'],
+    importer:['importer','import','importeur'],
+    service:['repair','service','workshop','verkstad','werkstatt']
+  }[type] || [];
+  for (const w of typeWords) if (blob.includes(w)) { match += 10; score += 5; tags.push(type); }
+
+  const region = regionMatch(url,title,text,p.country,p.city);
+  if (region.countryHit && p.country) { score += 12; match += 8; tags.push('country'); }
+  if (region.cityHit && p.city) { score += 12; match += 8; tags.push('city'); }
+
+  if (/news|review|forum|blog|magazine|wiki|marketplace|classified/i.test(blob)) { score -= 35; match -= 15; tags.push('low-relevance'); }
+
+  return {score: Math.max(0, score), match: Math.max(0, match), tags: uniq(tags), region};
+}
+
+async function analyzeSite(candidate, p, diag) {
+  const url = normalizeUrl(candidate.url);
+  if (!url) return null;
+  const pages = [url];
+  let allText = '';
+  let allHtml = '';
   let contactUrl = '';
-  if (home.text) {
-    for (const link of contactLinks(url, home.text)) {
-      if (emails.length >= 4 && phones.length) break;
-      const sub = await fetchText(link, 5000);
-      if (sub.text) {
-        if (!contactUrl) contactUrl = link;
-        combined += ' ' + sub.text;
-        emails = uniq(emails.concat(extractEmails(sub.text)));
-        phones = uniq(phones.concat(extractPhones(sub.text)));
-      }
-    }
+  const emails = new Set();
+  const phones = new Set();
+  let statusNotes = [];
+
+  const first = await fetchText(url, 8500);
+  diag.analyzed++;
+  if (!first.ok) {
+    return {
+      url, title:candidate.title || domainFromUrl(url), phones:[], emails:[],
+      priorityEmail:'', contactUrl:'', score:0, match:0, type:'unknown', tags:[],
+      notes:`Homepage HTTP ${first.status || 'timeout'}`
+    };
   }
-  const meta = scoreLead(item, stripTags(combined).slice(0, 40000), emails, phones, form);
+  allHtml += first.text + '\n';
+  allText += cleanHtmlText(first.text) + '\n';
+  for (const e of first.text.match(EMAIL_RE) || []) emails.add(e.toLowerCase());
+  for (const ph of first.text.match(PHONE_RE) || []) if (String(ph).replace(/\D/g,'').length >= 7) phones.add(ph.trim());
+
+  const links = extractRelevantLinks(url, first.text);
+  for (const link of links.slice(0,3)) {
+    const rr = await fetchText(link, 6500);
+    if (!rr.ok) continue;
+    if (!contactUrl && /contact|kontakt|impressum|dealer|wholesale|distributor/i.test(link)) contactUrl = link;
+    allHtml += rr.text + '\n';
+    allText += cleanHtmlText(rr.text) + '\n';
+    for (const e of rr.text.match(EMAIL_RE) || []) emails.add(e.toLowerCase());
+    for (const ph of rr.text.match(PHONE_RE) || []) if (String(ph).replace(/\D/g,'').length >= 7) phones.add(ph.trim());
+  }
+
+  const emailList = uniq([...emails]).filter(e => !/\.(png|jpg|jpeg|gif|webp)$/i.test(e));
+  const phoneList = uniq([...phones]).slice(0,3);
+  const title = candidate.title || (first.text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1] || domainFromUrl(url);
+
+  const sc = scoreLead({url,title,text:allText,emails:emailList,phones:phoneList,p});
+  let type = 'other';
+  const blob = lower([url,title,allText].join(' '));
+  if (/distributor|distribution|distribuidor|distributeur/.test(blob)) type = 'distributor';
+  else if (/wholesale|wholesaler|grossist|großhandel/.test(blob)) type = 'wholesale';
+  else if (/dealer|händler|handler|handlare|revendeur/.test(blob)) type = 'dealer';
+  else if (/shop|store|laden|butik|affär|winkel|magasin|fahrradladen|cykelbutik/.test(blob)) type = 'shop';
+
   return {
-    title: item.title || domain,
-    url,
-    domain,
-    phones,
-    emails,
-    priorityEmail: pickPriorityEmail(emails),
-    contactUrl,
-    score: meta.score,
-    match: meta.match,
-    type: labelType(combined),
-    regionOk: meta.region.both,
-    notes: home.ok ? 'Checked website' : ('Homepage HTTP ' + (home.status || home.error || 'error'))
+    url, title: cleanHtmlText(title).slice(0,140), phones: phoneList, emails: emailList,
+    priorityEmail: choosePriorityEmail(emailList), contactUrl, score: sc.score, match: sc.match,
+    type, tags: sc.tags, region: sc.region,
+    notes: `Checked ${1 + Math.min(3, links.length)} pages`
   };
 }
 
-function passesFilters(r, form) {
-  if (form.onlyEmail && !r.emails.length) return false;
-  if (form.onlyPhone && !r.phones.length) return false;
-  if (r.score < form.minScore) return false;
-  if (r.match < form.minMatch) return false;
-  if (form.countryMode === 'strict' || form.cityMode === 'strict') {
-    if (!r.regionOk) return false;
+function passFinalFilters(r, p) {
+  if (!r) return false;
+  if (Number(r.score) < Number(p.minScore || 0)) return false;
+  if (Number(r.match) < Number(p.minMatch || 0)) return false;
+  if (p.onlyEmail && !r.emails.length) return false;
+  if (p.onlyPhone && !r.phones.length) return false;
+  if (p.countryMode === 'strict' && p.country && !r.region.countryHit) return false;
+  if (p.cityMode === 'strict' && p.city && !r.region.cityHit) return false;
+  if (p.type && p.type !== 'all' && r.type !== p.type) {
+    // allow dealer/distributor/wholesale overlap when match is high
+    if (!((p.type === 'dealer' || p.type === 'distributor') && r.match >= 35)) return false;
   }
   return true;
 }
 
-async function runSearch(form) {
-  const diag = { queries: [], candidates: 0, afterExclude: 0, afterRegion: 0, analyzed: 0, final: 0, message: '' };
-  const excludes = splitWords(form.exclude);
+async function runSearch(p) {
+  const diag = {
+    queries: buildQueries(p),
+    sourceAttempts: [],
+    candidatesRaw: 0,
+    candidatesAfterExclude: 0,
+    candidatesAfterRegionPreFilter: 0,
+    analyzed: 0,
+    final: 0,
+    message: ''
+  };
+
+  const exclude = splitCSV(p.exclude).map(lower);
   let candidates = [];
-  const manual = splitWords(form.manualUrls).map(normalizeUrl).filter(Boolean).map(u => ({ title: domainFromUrl(u), url: u, snippet: 'manual input' }));
+
+  const manual = String(p.urls || '').split(/\r?\n/).map(normalizeUrl).filter(Boolean);
   if (manual.length) {
-    candidates = manual;
-    diag.message = '使用手动官网列表，跳过公开搜索。';
+    candidates = manual.map(u => ({url:u, title:domainFromUrl(u), source:'manual'}));
+    diag.message = '使用手动官网列表，不依赖公开搜索。';
   } else {
-    const queries = buildQueries(form);
-    diag.queries = queries;
-    for (const q of queries) {
-      const [b, d] = await Promise.allSettled([searchBingRss(q), searchDuckDuckGo(q)]);
-      if (b.status === 'fulfilled') candidates.push(...b.value);
-      if (d.status === 'fulfilled') candidates.push(...d.value);
-      if (candidates.length >= form.limit * 4) break;
+    for (const q of diag.queries) {
+      const got = await searchWeb(q, diag);
+      candidates.push(...got);
+      if (candidates.length >= Number(p.target || 20) * 4) break;
     }
   }
+
+  // Deduplicate and exclude junk.
   const seen = new Set();
-  candidates = candidates.map(x => ({ ...x, url: normalizeUrl(x.url) })).filter(x => x.url).filter(x => {
-    const d = domainFromUrl(x.url);
-    if (!d || seen.has(d)) return false;
-    seen.add(d); return true;
-  });
-  diag.candidates = candidates.length;
-  candidates = candidates.filter(x => !isExcluded(x, excludes));
-  diag.afterExclude = candidates.length;
-  if (form.countryMode === 'strict' || form.cityMode === 'strict') {
-    candidates = candidates.filter(x => {
-      const m = isRegionMatch(x, form.countries, form.cities);
-      if (form.countryMode === 'strict' && !m.countryOk) return false;
-      if (form.cityMode === 'strict' && !m.cityOk) return false;
-      return true;
+  let deduped = [];
+  for (const c of candidates) {
+    const u = normalizeUrl(c.url);
+    const d = domainFromUrl(u);
+    if (!u || !d || seen.has(d)) continue;
+    seen.add(d);
+    deduped.push({url:u, title:c.title || d, source:c.source});
+  }
+  diag.candidatesRaw = deduped.length;
+
+  deduped = deduped.filter(c => !isBadCandidate(c.url, c.title, exclude));
+  diag.candidatesAfterExclude = deduped.length;
+
+  // Light prefilter for region. In "prefer" mode we do not remove; we sort up. In strict mode, filter by URL/title only first.
+  if ((p.countryMode === 'strict' && p.country) || (p.cityMode === 'strict' && p.city)) {
+    deduped = deduped.filter(c => {
+      const rm = regionMatch(c.url,c.title,'',p.country,p.city);
+      const countryOk = !(p.countryMode === 'strict' && p.country) || rm.countryHit;
+      const cityOk = !(p.cityMode === 'strict' && p.city) || rm.cityHit;
+      return countryOk && cityOk;
     });
   }
-  diag.afterRegion = candidates.length;
-  const maxAnalyze = Math.min(candidates.length, Math.max(form.limit * 3, 12));
+  diag.candidatesAfterRegionPreFilter = deduped.length;
+
+  // Prefer regional signals before analysis.
+  deduped.sort((a,b) => {
+    const ra = regionMatch(a.url,a.title,'',p.country,p.city);
+    const rb = regionMatch(b.url,b.title,'',p.country,p.city);
+    return ((rb.countryHit?1:0)+(rb.cityHit?1:0)) - ((ra.countryHit?1:0)+(ra.cityHit?1:0));
+  });
+
+  const maxAnalyze = Math.min(Math.max(Number(p.target || 20) * 2, 12), 36);
   const results = [];
-  for (const item of candidates.slice(0, maxAnalyze)) {
-    const r = await analyzeUrl(item, form);
-    diag.analyzed += 1;
-    if (passesFilters(r, form)) results.push(r);
-    if (results.length >= form.limit) break;
+  for (const c of deduped.slice(0, maxAnalyze)) {
+    const r = await analyzeSite(c, p, diag);
+    if (passFinalFilters(r, p)) results.push(r);
+    if (results.length >= Number(p.target || 20)) break;
   }
-  if (form.sort === 'match') results.sort((a,b) => b.match - a.match || b.score - a.score);
-  else results.sort((a,b) => b.score - a.score || b.match - a.match);
+
+  if (p.sort === 'match') results.sort((a,b) => b.match - a.match);
+  else if (p.sort === 'email') results.sort((a,b) => Number(!!b.priorityEmail) - Number(!!a.priorityEmail) || b.score - a.score);
+  else results.sort((a,b) => b.score - a.score);
+
   diag.final = results.length;
-  if (!diag.message) {
-    if (!diag.candidates) diag.message = '公开搜索源返回 0 个候选网站。建议改用手动官网列表或换搜索词。';
-    else if (!diag.afterExclude) diag.message = '候选网站都被排除关键词过滤了。请减少排除关键词。';
-    else if (!diag.afterRegion) diag.message = '候选网站没有通过地区严格筛选。请改为相关优先或不限制。';
-    else if (!results.length) diag.message = '候选网站已分析，但没有通过邮箱/电话/分数等筛选。请降低筛选条件。';
+  if (!manual.length && diag.candidatesRaw === 0) {
+    diag.message = '公开搜索源返回 0 个候选网站。请尝试更短的关键词，或直接粘贴官网列表。';
+  } else if (diag.candidatesAfterExclude === 0) {
+    diag.message = '候选网站都被排除关键词/域名过滤掉了。请减少排除词。';
+  } else if (diag.candidatesAfterRegionPreFilter === 0) {
+    diag.message = '严格地区筛选过滤掉了所有候选。请改为“相关优先”或“不限制”。';
+  } else if (results.length === 0) {
+    diag.message = '已找到候选网站，但最终筛选后为 0。请降低最低分/匹配度，或取消只看邮箱/电话。';
   }
-  return { results, diag };
+
+  return {results, diag};
 }
 
-function getForm(raw) {
-  const selectedCountry = raw.country || raw.countries || 'Germany';
-  const selectedCity = raw.city || raw.cities || 'Berlin';
-  const countries = arr(selectedCountry).filter(Boolean);
-  const cities = arr(selectedCity).filter(Boolean);
+function formValue(q, k, def='') { return q.get(k) ?? def; }
+function paramsFromUrl(urlObj) {
+  const q = urlObj.searchParams;
   return {
-    manualUrls: raw.manualUrls || '',
-    customerType: raw.customerType || 'all',
-    countryMode: raw.countryMode || 'priority',
-    cityMode: raw.cityMode || 'priority',
-    countries: countries.length ? countries : ['Germany'],
-    cities: cities.length ? cities : ['Berlin'],
-    limit: Math.max(1, Math.min(50, Number(raw.limit || 20))),
-    keyword: raw.keyword || 'bike shop',
-    product: raw.product || 'bike parts, cycling accessories, power meter, crankset',
-    mustInclude: raw.mustInclude || 'bike,bicycle,cycling,shop,dealer,distributor,parts',
-    exclude: raw.exclude || 'microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine,aliexpress,alibaba',
-    minScore: Number(raw.minScore || 0),
-    minMatch: Number(raw.minMatch || 0),
-    sort: raw.sort || 'score',
-    onlyEmail: raw.onlyEmail === 'on',
-    onlyPhone: raw.onlyPhone === 'on'
+    urls: formValue(q,'urls',''),
+    type: formValue(q,'type','all'),
+    countryMode: formValue(q,'countryMode','prefer'),
+    country: formValue(q,'country','Germany'),
+    cityMode: formValue(q,'cityMode','prefer'),
+    city: formValue(q,'city','Berlin'),
+    target: Math.min(Math.max(parseInt(formValue(q,'target','10'),10) || 10, 1), 30),
+    keyword: formValue(q,'keyword','bike shop'),
+    product: formValue(q,'product','bike parts, cycling accessories, power meter, crankset'),
+    required: formValue(q,'required','bike,bicycle,cycling,shop,dealer,distributor,parts'),
+    exclude: formValue(q,'exclude','microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine'),
+    minScore: parseInt(formValue(q,'minScore','0'),10) || 0,
+    minMatch: parseInt(formValue(q,'minMatch','0'),10) || 0,
+    onlyEmail: q.get('onlyEmail') === 'on',
+    onlyPhone: q.get('onlyPhone') === 'on',
+    sort: formValue(q,'sort','score')
   };
 }
+function selected(a,b) { return String(a) === String(b) ? 'selected' : ''; }
+function checked(v) { return v ? 'checked' : ''; }
 
-function options(list, selected) {
-  const set = new Set(selected || []);
-  return list.map(([v, label]) => `<option value="${esc(v)}"${set.has(v) ? ' selected' : ''}>${esc(label)}</option>`).join('');
-}
-function singleOptions(list, selected) {
-  const current = (selected || [])[0] || 'ALL';
-  return list.map(([v, label]) => `<option value="${esc(v)}"${current === v ? ' selected' : ''}>${esc(label)}</option>`).join('');
+function renderPage(p, data) {
+  const results = data?.results || [];
+  const diag = data?.diag || null;
+  const rows = results.map(r => `
+    <tr>
+      <td><span class="badge">${esc(r.score)}</span></td>
+      <td><span class="badge muted">${esc(r.match)}</span></td>
+      <td>${esc(labelType(r.type))}</td>
+      <td><b>${esc(r.title || domainFromUrl(r.url))}</b><br><a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a><div class="small">${esc((r.tags||[]).join(', '))}</div></td>
+      <td>${esc((r.phones||[]).join('; '))}</td>
+      <td><b>${esc(r.priorityEmail||'')}</b></td>
+      <td>${esc((r.emails||[]).join('; '))}</td>
+      <td>${r.contactUrl ? `<a href="${esc(r.contactUrl)}" target="_blank">打开</a>` : ''}</td>
+      <td class="small">${esc(r.notes||'')}</td>
+    </tr>
+  `).join('');
+
+  const csvData = encodeURIComponent(toCSV(results));
+  const diagHtml = diag ? `
+    <div class="diag">
+      <b>搜索诊断：</b>
+      候选 ${diag.candidatesRaw}，排除后 ${diag.candidatesAfterExclude}，地区筛选后 ${diag.candidatesAfterRegionPreFilter}，已分析 ${diag.analyzed}，最终 ${diag.final}
+      <br><b>搜索词：</b> ${esc(diag.queries.join(' | '))}
+      ${diag.message ? `<br><b>提示：</b> ${esc(diag.message)}` : ''}
+      <details><summary>搜索源状态</summary>
+        <pre>${esc(JSON.stringify(diag.sourceAttempts, null, 2))}</pre>
+      </details>
+    </div>
+  ` : '';
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>全球骑行配件 B2B 线索采集工具</title>
+<style>
+:root{--bg:#f5f7fb;--card:#fff;--ink:#0f172a;--muted:#64748b;--line:#dbe5f2;--blue:#0f172a;--soft:#eef6ff;--orange:#fff7ed}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Arial,"Microsoft YaHei",sans-serif;color:var(--ink)}
+.wrap{max-width:1180px;margin:32px auto;padding:0 20px}.card{background:var(--card);border-radius:18px;box-shadow:0 16px 40px rgba(15,23,42,.08);padding:28px;margin-bottom:24px}
+h1{margin:0 0 8px;font-size:30px}.version{display:inline-block;background:#d1fae5;color:#047857;font-size:13px;border-radius:999px;padding:6px 12px;margin-left:12px}.lead{color:#475569;margin:0 0 18px}
+.notice{background:var(--orange);border:1px solid #fdba74;border-radius:12px;padding:14px 16px;color:#9a3412;margin-bottom:18px;line-height:1.55}
+.region{background:#eef6ff;border:1px solid #bfdbfe;border-radius:14px;padding:18px;margin:16px 0}.region h2{margin:0 0 8px;font-size:22px}.small{font-size:12px;color:var(--muted);line-height:1.45}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+label{font-size:13px;color:#334155;display:block;margin-bottom:6px}input,textarea,select{width:100%;border:1px solid #cbd5e1;border-radius:10px;padding:12px 14px;font-size:15px;background:#fff}textarea{min-height:86px;font-family:ui-monospace,monospace}
+button,.btn{border:0;border-radius:12px;padding:14px 22px;background:#0f172a;color:#fff;font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}.btn.secondary{background:#94a3b8}.actions{display:flex;gap:12px;align-items:end}
+.checks{display:flex;gap:22px;margin:14px 0}.checks label{display:flex;align-items:center;gap:8px;margin:0}.checks input{width:auto}
+.progress{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin-top:10px}.bar{height:100%;background:#0f172a;width:${data ? '100' : '0'}%}
+table{width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;font-size:14px}th,td{border-bottom:1px solid #e2e8f0;padding:12px;text-align:left;vertical-align:top}th{background:#f8fafc}.badge{background:#e0e7ff;border-radius:999px;padding:4px 8px;color:#3730a3;font-size:12px}.badge.muted{background:#e2e8f0;color:#334155}
+.diag{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-top:14px;line-height:1.6}.diag pre{white-space:pre-wrap;max-height:260px;overflow:auto}
+@media(max-width:900px){.grid,.grid3{grid-template-columns:1fr}.actions{align-items:stretch}.wrap{padding:0 12px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>全球骑行配件 B2B 线索采集工具 <span class="version">${VERSION}</span></h1>
+    <p class="lead">面向全球寻找自行车店、骑行店、配件经销商、批发商、分销商、进口商官网，并从公开页面提取邮箱和电话。</p>
+    <div class="notice"><b>说明：</b> 免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。默认排除的是搜索引擎、社媒、新闻测评、论坛、百科和大平台页面，不是排除你的浏览器。</div>
+
+    <form method="GET" action="/search">
+      <label>可选：直接粘贴官网列表，一行一个。填写这里会优先分析这些网站，不依赖公开搜索。</label>
+      <textarea name="urls" placeholder="例如：&#10;https://example-bike-shop.de&#10;https://example-distributor.com">${esc(p.urls)}</textarea>
+
+      <div class="region">
+        <h2>地区筛选</h2>
+        <p class="small">这里是单选筛选，不做多选。一次只跑一个国家/市场和一个城市/地区，结果更清楚，也更适合按市场分批开发。</p>
+        <div class="grid">
+          <div><label>国家/市场筛选模式</label><select name="countryMode">
+            <option value="none" ${selected(p.countryMode,'none')}>不限制国家</option>
+            <option value="prefer" ${selected(p.countryMode,'prefer')}>国家相关优先</option>
+            <option value="strict" ${selected(p.countryMode,'strict')}>严格匹配国家</option>
+          </select></div>
+          <div><label>国家/市场，单选</label><select name="country">${COUNTRY_PRESETS.map(([v,l])=>`<option value="${esc(v)}" ${selected(p.country,v)}>${esc(l)}</option>`).join('')}</select></div>
+          <div><label>城市/地区筛选模式</label><select name="cityMode">
+            <option value="none" ${selected(p.cityMode,'none')}>不限制城市</option>
+            <option value="prefer" ${selected(p.cityMode,'prefer')}>城市相关优先</option>
+            <option value="strict" ${selected(p.cityMode,'strict')}>严格匹配城市</option>
+          </select></div>
+          <div><label>城市/地区，单选</label><select name="city">${CITY_PRESETS.map(([v,l])=>`<option value="${esc(v)}" ${selected(p.city,v)}>${esc(l)}</option>`).join('')}</select></div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div><label>目标客户类型</label><select name="type">
+          ${['all','shop','dealer','distributor','wholesale','importer','service'].map(v=>`<option value="${v}" ${selected(p.type,v)}>${esc(labelType(v))}</option>`).join('')}
+        </select></div>
+        <div><label>目标数量</label><input name="target" value="${esc(p.target)}"></div>
+        <div><label>主搜索关键词</label><input name="keyword" value="${esc(p.keyword)}"></div>
+        <div><label>产品方向标签</label><input name="product" value="${esc(p.product)}"></div>
+        <div><label>必须包含关键词</label><input name="required" value="${esc(p.required)}"></div>
+        <div><label>排除关键词/域名，可编辑</label><input name="exclude" value="${esc(p.exclude)}"><div class="small">黑名单，用来过滤搜索引擎、新闻、论坛、社媒、大平台等无关页。</div></div>
+        <div><label>最低总分</label><input name="minScore" value="${esc(p.minScore)}"></div>
+        <div><label>最低匹配度</label><input name="minMatch" value="${esc(p.minMatch)}"></div>
+        <div><label>排序</label><select name="sort"><option value="score" ${selected(p.sort,'score')}>按总分排序</option><option value="match" ${selected(p.sort,'match')}>按匹配度排序</option><option value="email" ${selected(p.sort,'email')}>有邮箱优先</option></select></div>
+        <div class="actions"><button type="submit">开始提取</button><a class="btn secondary" href="/">重置</a></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" name="onlyEmail" ${checked(p.onlyEmail)}> 只看有邮箱</label>
+        <label><input type="checkbox" name="onlyPhone" ${checked(p.onlyPhone)}> 只看有电话</label>
+      </div>
+      <b>${data ? `完成：找到 ${results.length} 条线索` : '准备就绪'}</b>
+      <div class="progress"><div class="bar"></div></div>
+      <div class="small">如果按钮无响应，也可以在任意输入框按 Enter 提交。搜索可能需要几十秒；免费 Render 有冷启动。</div>
+      ${diagHtml}
+    </form>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <h2>结果 ${results.length} 条</h2>
+      <a class="btn secondary" href="data:text/csv;charset=utf-8,${csvData}" download="global-cycling-b2b-leads.csv">下载 CSV</a>
+    </div>
+    <table>
+      <thead><tr><th>分数</th><th>匹配度</th><th>类型</th><th>公司/网站</th><th>电话</th><th>优先邮箱</th><th>全部邮箱</th><th>Contact 页面</th><th>备注</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" class="small">暂无结果。可以降低筛选条件，或者直接粘贴官网列表。</td></tr>'}</tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>`;
 }
 
-function page(form, results, diag) {
-  const rows = results.map(r => `<tr><td>${r.score}</td><td>${r.match}</td><td>${esc(r.type)}</td><td><b>${esc(r.title)}</b><br><a href="${esc(r.url)}" target="_blank">${esc(r.domain)}</a></td><td>${esc(r.phones.join('; '))}</td><td><b>${esc(r.priorityEmail)}</b></td><td>${esc(r.emails.join('; '))}</td><td>${r.contactUrl ? `<a href="${esc(r.contactUrl)}" target="_blank">打开</a>` : ''}</td><td>${esc(r.notes)}</td></tr>`).join('');
-  const diagHtml = diag ? `<div class="diag"><b>搜索诊断：</b> 候选 ${diag.candidates}，排除后 ${diag.afterExclude}，地区筛选后 ${diag.afterRegion}，已分析 ${diag.analyzed}，最终 ${diag.final}<br><b>搜索词：</b> ${esc((diag.queries || []).join(' | '))}<br>${esc(diag.message || '')}</div>` : '';
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>全球骑行配件 B2B 线索采集工具</title><style>
-  body{margin:0;background:#f4f6fb;color:#0f172a;font-family:Arial,'Microsoft YaHei',sans-serif}.wrap{max-width:1180px;margin:28px auto;padding:0 18px}.card{background:#fff;border-radius:18px;padding:24px;box-shadow:0 18px 50px rgba(15,23,42,.08);margin-bottom:22px}.badge{display:inline-block;background:#dcfce7;color:#047857;border-radius:999px;padding:8px 14px;font-size:13px;margin-left:12px}.notice{background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:12px;padding:14px;margin:16px 0}.region{background:#eff6ff;border:1px solid #bfdbfe;border-radius:14px;padding:16px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}label{font-size:13px;color:#475569;display:block;margin-bottom:6px}input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:11px;padding:12px;font-size:15px;background:#fff}.checkgrid{max-height:170px;overflow:auto;border:1px solid #cbd5e1;border-radius:12px;background:#fff;padding:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.checkgrid.compact{grid-template-columns:repeat(2,minmax(0,1fr))}.checkpill{display:flex;align-items:center;gap:7px;margin:0!important;font-size:13px;color:#0f172a;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:8px;cursor:pointer}.checkpill input{width:auto;margin:0}.checkpill:has(input:checked){background:#dbeafe;border-color:#60a5fa;font-weight:700}.help{font-size:12px;color:#64748b;margin-top:6px}.actions{display:flex;gap:12px;align-items:center}.btn{border:0;background:#0f172a;color:#fff;border-radius:12px;padding:14px 26px;font-weight:700;font-size:16px;cursor:pointer}.btn2{background:#94a3b8}.checks{display:flex;gap:20px;align-items:center;margin:14px 0}.checks label{display:flex;gap:6px;align-items:center;margin:0}.checks input{width:auto}.bar{height:10px;border-radius:99px;background:#0f172a;margin-top:12px}.small{font-size:12px;color:#64748b}.diag{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin:14px 0;color:#334155;line-height:1.7}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px solid #e2e8f0;text-align:left;padding:12px;vertical-align:top}th{background:#f8fafc}a{color:#2563eb;text-decoration:none}.csv{float:right;background:#64748b;color:#fff;padding:12px 18px;border-radius:12px;font-weight:700}@media(max-width:900px){.grid,.grid3{grid-template-columns:1fr}.actions{display:block}.btn{width:100%;margin:8px 0}}
-  </style></head><body><div class="wrap"><div class="card"><h1>全球骑行配件 B2B 线索采集工具 <span class="badge">${VERSION}</span></h1><p>面向全球寻找自行车店、骑行店、配件经销商、批发商、分销商、进口商官网，并从公开页面提取邮箱和电话。</p><div class="notice"><b>说明：</b> 免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。默认排除的是搜索引擎、社媒、新闻测评、论坛、百科和大平台页面。</div>
-  <form method="POST" action="/search"><label>可选：直接粘贴官网列表，一行一个。填写这里会优先分析这些网站，不依赖公开搜索。</label><textarea name="manualUrls" rows="4" placeholder="例如：\nhttps://example-bike-shop.de\nhttps://example-distributor.com">${esc(form.manualUrls)}</textarea>
-  <div class="region"><h2>地区筛选</h2><p class="small">这里是单选筛选，不做多选。一次只跑一个国家/市场和一个城市/地区，结果更清楚，也更适合按市场分批开发。</p><div class="grid"><div><label>国家/市场筛选模式</label><select name="countryMode"><option value="none"${form.countryMode==='none'?' selected':''}>不限制国家</option><option value="priority"${form.countryMode==='priority'?' selected':''}>国家相关优先</option><option value="strict"${form.countryMode==='strict'?' selected':''}>严格匹配国家</option></select><div class="help">建议先用“国家相关优先”，结果太杂再改严格匹配。</div></div><div><label>国家/市场，单选</label><select name="country">${singleOptions(COUNTRY_OPTIONS, form.countries)}</select><div class="help">一次选择一个国家/市场；选“全球/不限制”表示不限国家。</div></div><div><label>城市/地区筛选模式</label><select name="cityMode"><option value="none"${form.cityMode==='none'?' selected':''}>不限制城市</option><option value="priority"${form.cityMode==='priority'?' selected':''}>城市相关优先</option><option value="strict"${form.cityMode==='strict'?' selected':''}>严格匹配城市</option></select><div class="help">建议先用“城市相关优先”，搜索不到再改不限制。</div></div><div><label>城市/地区，单选</label><select name="city">${singleOptions(CITY_OPTIONS, form.cities)}</select><div class="help">一次选择一个城市；选“全部城市/不限制”表示不限城市。</div></div></div></div>
-  <div class="grid"><div><label>目标客户类型</label><select name="customerType"><option value="all"${form.customerType==='all'?' selected':''}>全部类型</option><option value="shop"${form.customerType==='shop'?' selected':''}>自行车店 / 门店</option><option value="dealer"${form.customerType==='dealer'?' selected':''}>经销商 Dealer</option><option value="distributor"${form.customerType==='distributor'?' selected':''}>分销 / 批发 / 进口商</option><option value="service"${form.customerType==='service'?' selected':''}>维修 / 服务店</option></select></div><div><label>目标数量</label><input name="limit" type="number" min="1" max="50" value="${esc(form.limit)}"></div><div><label>主搜索关键词</label><input name="keyword" value="${esc(form.keyword)}"></div><div><label>产品方向标签</label><input name="product" value="${esc(form.product)}"></div></div>
-  <div class="grid"><div><label>必须包含关键词</label><input name="mustInclude" value="${esc(form.mustInclude)}"></div><div><label>排除关键词/域名，可编辑</label><input name="exclude" value="${esc(form.exclude)}"><div class="help">黑名单，用来过滤搜索引擎、新闻、论坛、社媒、大平台等无关页。</div></div><div><label>最低总分</label><input name="minScore" type="number" value="${esc(form.minScore)}"></div><div><label>最低匹配度</label><input name="minMatch" type="number" value="${esc(form.minMatch)}"></div></div>
-  <div class="grid3"><div><label>排序</label><select name="sort"><option value="score"${form.sort==='score'?' selected':''}>按总分排序</option><option value="match"${form.sort==='match'?' selected':''}>按匹配度排序</option></select></div><div class="checks"><label><input type="checkbox" name="onlyEmail"${form.onlyEmail?' checked':''}>只看有邮箱</label><label><input type="checkbox" name="onlyPhone"${form.onlyPhone?' checked':''}>只看有电话</label></div><div class="actions"><button class="btn" type="submit">开始提取</button><a class="btn btn2" href="/" style="text-align:center;text-decoration:none">重置</a></div></div>
-  <p><b>${diag ? '完成：找到 ' + results.length + ' 条线索' : '准备就绪'}</b></p><div class="bar"></div><p class="small">如果按钮无响应，可在任意输入框按 Enter 提交。搜索可能需要几十秒；免费 Render 有冷启动。</p></form>${diagHtml}</div>
-  <div class="card"><a class="csv" href="/download.csv">下载 CSV</a><h2>结果 ${results.length} 条</h2><table><thead><tr><th>分数</th><th>匹配度</th><th>类型</th><th>公司/网站</th><th>电话</th><th>优先邮箱</th><th>全部邮箱</th><th>Contact 页面</th><th>备注</th></tr></thead><tbody>${rows || '<tr><td colspan="9">暂无结果。可以降低筛选条件，或直接粘贴官网列表。</td></tr>'}</tbody></table></div></div></body></html>`;
-}
-
-function toCsv(rows) {
-  const header = ['score','match','type','title','domain','url','phones','priority_email','emails','contact_url','notes'];
-  const lines = [header.join(',')];
-  rows.forEach(r => {
-    const vals = [r.score,r.match,r.type,r.title,r.domain,r.url,r.phones.join('; '),r.priorityEmail,r.emails.join('; '),r.contactUrl,r.notes].map(v => '"' + String(v == null ? '' : v).replace(/"/g,'""') + '"');
-    lines.push(vals.join(','));
-  });
+function toCSV(results) {
+  const headers = ['score','match','type','title','url','phone','priority_email','emails','contact_url','notes'];
+  const lines = [headers.join(',')];
+  for (const r of results) {
+    const row = [
+      r.score, r.match, labelType(r.type), r.title, r.url, (r.phones||[]).join('; '),
+      r.priorityEmail||'', (r.emails||[]).join('; '), r.contactUrl||'', r.notes||''
+    ].map(v => `"${String(v??'').replace(/"/g,'""')}"`);
+    lines.push(row.join(','));
+  }
   return lines.join('\n');
 }
 
-const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, 'http://localhost');
-  if (u.pathname === '/health') { res.writeHead(200, {'content-type':'text/plain'}); return res.end('ok ' + VERSION); }
-  if (u.pathname === '/download.csv') {
-    const csv = toCsv(LAST_RESULTS);
-    res.writeHead(200, {'content-type':'text/csv; charset=utf-8', 'content-disposition':'attachment; filename="' + LAST_CSV_NAME + '"'});
-    return res.end('\ufeff' + csv);
-  }
-  if (req.method === 'POST' && u.pathname === '/search') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; if (body.length > 2_000_000) req.destroy(); });
-    req.on('end', async () => {
-      const raw = querystring.parse(body);
-      const form = getForm(raw);
-      try {
-        const { results, diag } = await runSearch(form);
-        LAST_RESULTS = results;
-        LAST_CSV_NAME = 'global-cycling-b2b-leads-' + Date.now() + '.csv';
-        res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
-        res.end(page(form, results, diag));
-      } catch (e) {
-        res.writeHead(500, {'content-type':'text/html; charset=utf-8'});
-        res.end(page(form, [], { candidates:0, afterExclude:0, afterRegion:0, analyzed:0, final:0, queries:[], message:'服务器错误：' + (e.stack || e.message) }));
-      }
-    });
+const server = http.createServer(async (req,res) => {
+  const urlObj = new URL(req.url, `http://${req.headers.host}`);
+  if (urlObj.pathname === '/health') {
+    res.writeHead(200, {'content-type':'application/json'});
+    res.end(JSON.stringify({ok:true, version:VERSION}));
     return;
   }
-  const form = getForm({});
+  if (urlObj.pathname === '/search') {
+    const p = paramsFromUrl(urlObj);
+    let data;
+    try {
+      data = await runSearch(p);
+    } catch (e) {
+      data = {results:[], diag:{queries:[],sourceAttempts:[],candidatesRaw:0,candidatesAfterExclude:0,candidatesAfterRegionPreFilter:0,analyzed:0,final:0,message:'运行出错：'+String(e && e.message || e)}};
+    }
+    res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
+    res.end(renderPage(p, data));
+    return;
+  }
+  const p = paramsFromUrl(urlObj);
   res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
-  res.end(page(form, [], null));
+  res.end(renderPage(p, null));
 });
 
 server.listen(PORT, () => {
-  console.log('B2B Lead Scraper ' + VERSION + ' running on port ' + PORT);
+  console.log(`${VERSION} running on port ${PORT}`);
 });
