@@ -3,5 +3,5 @@ services:
     name: b2b-lead-scraper-online
     env: node
     plan: free
-    buildCommand: "npm install"
+    buildCommand: ""
     startCommand: "npm start"

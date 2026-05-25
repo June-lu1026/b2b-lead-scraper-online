@@ -1,13 +1,1 @@
-{
-  "name": "b2b-lead-scraper-online",
-  "version": "5.0.0",
-  "description": "Cycling B2B lead scraper - no Google API, no dependencies, anti-stuck version",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {}
-}
+{"scripts":{"start":"node server.js"},"dependencies":{},"engines":{"node":">=18"},"name":"b2b-lead-scraper-online","version":"5.1.0","private":true}
