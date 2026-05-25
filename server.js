@@ -1,1066 +1,358 @@
-/*
-  B2B Lead Scraper - Free Cycling Dealer Version
-  Requires: Node.js 18+
-  No npm install needed. Uses only built-in Node.js modules.
-
-  What it does:
-  - Takes keyword + location
-  - Searches public DuckDuckGo HTML results
-  - Visits candidate business websites
-  - Extracts public emails and phones from homepage/contact-like pages
-  - Streams results to browser as NDJSON
-
-  Notes:
-  - This version does NOT use Google Places API, so it cannot reliably return map business data.
-  - Results depend on public search pages and target website availability.
-  - Use politely and keep limits small.
-*/
+'use strict';
 
 const http = require('http');
 const { URL } = require('url');
-const path = require('path');
-const fs = require('fs');
 
-const PORT = Number(process.env.PORT || 3000);
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 B2BLeadScraperCycling/1.2-filter';
-const REQUEST_TIMEOUT_MS = 12000;
-const SEARCH_DELAY_MS = 900;
-const PAGE_DELAY_MS = 350;
+const PORT = process.env.PORT || 3000;
+const VERSION = 'v5 防卡顿筛选版';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function sendJson(res, status, data) {
-  const body = JSON.stringify(data);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body)
-  });
-  res.end(body);
-}
-
-function escapeHtml(str = '') {
-  return String(str).replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[ch]));
-}
-
-function decodeHtmlEntities(str = '') {
-  return String(str)
-    .replace(/&amp;/g, '&')
-    .replace(/&#x2F;/g, '/')
-    .replace(/&#x3D;/g, '=')
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function normalizeWhitespace(str = '') {
-  return String(str).replace(/\s+/g, ' ').trim();
-}
-
-function stripTags(html = '') {
-  return decodeHtmlEntities(
-    String(html)
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-  );
-}
-
-function hostOf(rawUrl) {
-  try {
-    return new URL(rawUrl).hostname.replace(/^www\./i, '').toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-function isBlockedHost(rawUrl) {
-  const host = hostOf(rawUrl);
-  if (!host) return true;
-  const blocked = [
-    'duckduckgo.com', 'google.com', 'bing.com', 'yahoo.com', 'facebook.com',
-    'instagram.com', 'linkedin.com', 'youtube.com', 'tiktok.com', 'x.com',
-    'twitter.com', 'pinterest.com', 'reddit.com', 'wikipedia.org',
-    'amazon.com', 'ebay.com', 'apple.com', 'mapquest.com',
-    'tripadvisor.com', 'yelp.com', 'yellowpages.com', 'trustpilot.com',
-    'opencorporates.com', 'zoominfo.com', 'rocketreach.co', 'microsoft.com', 'office.com', 'live.com', 'msn.com', 'github.com', 'stackoverflow.com', 'medium.com'
-  ];
-  return blocked.some(domain => host === domain || host.endsWith('.' + domain));
-}
-
-function cleanUrl(rawUrl) {
-  if (!rawUrl) return '';
-  let u = decodeHtmlEntities(String(rawUrl)).trim();
-
-  // DuckDuckGo redirect URL, e.g. /l/?uddg=https%3A%2F%2Fexample.com
-  try {
-    if (u.startsWith('//duckduckgo.com/l/') || u.startsWith('https://duckduckgo.com/l/') || u.startsWith('http://duckduckgo.com/l/')) {
-      const parsed = new URL(u.startsWith('//') ? 'https:' + u : u);
-      const uddg = parsed.searchParams.get('uddg');
-      if (uddg) u = decodeURIComponent(uddg);
-    }
-  } catch {}
-
-  // Bing redirect URL, e.g. /ck/a?...&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbQ...
-  try {
-    if (u.startsWith('/ck/') || u.includes('bing.com/ck/')) {
-      const parsed = new URL(u.startsWith('/') ? 'https://www.bing.com' + u : u);
-      const encoded = parsed.searchParams.get('u');
-      if (encoded) {
-        let b64 = encoded;
-        if (b64.startsWith('a1')) b64 = b64.slice(2);
-        b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
-        const decoded = Buffer.from(b64, 'base64').toString('utf8');
-        if (/^https?:\/\//i.test(decoded)) u = decoded;
-      }
-    }
-  } catch {}
-
-  if (u.startsWith('//')) u = 'https:' + u;
-  if (!/^https?:\/\//i.test(u)) return '';
-
-  try {
-    const parsed = new URL(u);
-    parsed.hash = '';
-    for (const p of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid']) {
-      parsed.searchParams.delete(p);
-    }
-    return parsed.toString();
-  } catch {
-    return '';
-  }
-}
-
-async function fetchText(rawUrl, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
-  try {
-    const headers = {
-      'User-Agent': options.userAgent || USER_AGENT,
-      'Accept': options.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': options.acceptLanguage || 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7'
-    };
-    if (options.contentType) headers['Content-Type'] = options.contentType;
-
-    const response = await fetch(rawUrl, {
-      method: options.method || 'GET',
-      body: options.body,
-      headers,
-      redirect: 'follow',
-      signal: controller.signal
-    });
-
-    const contentType = response.headers.get('content-type') || '';
-    if (!response.ok) {
-      return { ok: false, status: response.status, url: response.url, text: '', contentType };
-    }
-    const text = await response.text();
-    return { ok: true, status: response.status, url: response.url, text, contentType };
-  } catch (error) {
-    return { ok: false, status: 0, url: rawUrl, text: '', contentType: '', error: error.message };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-
-function buildSearchQueries(keyword, location) {
-  const kw = normalizeWhitespace(keyword || 'bike dealer');
-  const loc = normalizeWhitespace(location || '');
-  const lower = `${kw} ${loc}`.toLowerCase();
-  const isCycling = /\b(bicycle|bike|cycling|cycle|fahrrad|velo|ebike|e-bike|mtb)\b/i.test(lower);
-  let queries;
-  if (isCycling) {
-    queries = [
-      `"bike shop" "${loc}" contact email`,
-      `"bicycle shop" "${loc}" official website`,
-      `"cycling store" "${loc}" contact`,
-      `"bicycle dealer" "${loc}"`,
-      `"bike dealer" "${loc}" contact`,
-      `"Fahrradladen" "${loc}"`,
-      `"Radladen" "${loc}"`,
-      `"bicycle accessories" "${loc}" dealer`,
-      `"bike parts" "${loc}" shop`,
-      `"cycling accessories distributor" "${loc}"`,
-      `"bicycle parts distributor" "${loc}"`,
-      `"bike accessories wholesale" "${loc}"`
-    ];
-  } else {
-    const base = `${kw} ${loc}`.trim();
-    queries = [
-      `"${base}" official website email`,
-      `"${base}" contact`,
-      `"${base}" dealer retailer`,
-      `"${kw}" "${loc}" wholesale distributor`
-    ];
-  }
-  return Array.from(new Set(queries.filter(Boolean)));
-}
-
-function dedupeLinksByHost(links) {
-  const seen = new Set();
-  const cleaned = [];
-  for (const url of links) {
-    const host = hostOf(url);
-    if (!host || seen.has(host) || isBlockedHost(url)) continue;
-    seen.add(host);
-    cleaned.push(url);
-  }
-  return cleaned;
-}
-
-function extractDuckDuckGoLinks(html) {
-  const links = [];
-  const pattern = /class="result__a"[^>]+href="([^"]+)"/gi;
-  let match;
-  while ((match = pattern.exec(html)) !== null) {
-    const url = cleanUrl(match[1]);
-    if (url && !isBlockedHost(url)) links.push(url);
-  }
-  return dedupeLinksByHost(links);
-}
-
-function extractBingLinks(html) {
-  const links = [];
-  const patterns = [
-    /<li[^>]+class="[^"]*b_algo[^"]*"[\s\S]*?<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/gi,
-    /<h2[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"/gi
-  ];
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(html)) !== null) {
-      const url = cleanUrl(match[1]);
-      if (url && !isBlockedHost(url)) links.push(url);
-    }
-  }
-  return dedupeLinksByHost(links);
-}
-
-async function searchDuckDuckGo(query, maxLinks) {
-  const url = 'https://html.duckduckgo.com/html/?' + new URLSearchParams({ q: query }).toString();
-  const getResult = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
-  if (getResult.ok) {
-    const links = extractDuckDuckGoLinks(getResult.text).slice(0, maxLinks);
-    if (links.length) return links;
-  }
-
-  const form = new URLSearchParams({ q: query });
-  const postResult = await fetchText('https://html.duckduckgo.com/html/', {
-    method: 'POST',
-    body: form.toString(),
-    contentType: 'application/x-www-form-urlencoded',
-    timeoutMs: REQUEST_TIMEOUT_MS
-  });
-  if (!postResult.ok) return [];
-  return extractDuckDuckGoLinks(postResult.text).slice(0, maxLinks);
-}
-
-async function searchBing(query, maxLinks) {
-  const url = 'https://www.bing.com/search?' + new URLSearchParams({ q: query, count: String(Math.min(50, maxLinks + 10)) }).toString();
-  const result = await fetchText(url, { timeoutMs: REQUEST_TIMEOUT_MS });
-  if (!result.ok) return [];
-  return extractBingLinks(result.text).slice(0, maxLinks);
-}
-
-function parseManualWebsites(raw) {
-  const parts = String(raw || '')
-    .split(/[\s,;]+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-  const sites = [];
-  const seen = new Set();
-  for (let item of parts) {
-    if (!/^https?:\/\//i.test(item)) item = 'https://' + item;
-    const url = cleanUrl(item);
-    const host = hostOf(url);
-    if (!url || !host || seen.has(host) || isBlockedHost(url)) continue;
-    seen.add(host);
-    sites.push({ url, query: 'manual website list' });
-  }
-  return sites;
-}
-
-
-async function discoverCandidateSites(keyword, location, limit, onProgress) {
-  const queries = buildSearchQueries(keyword, location);
-  const seenHosts = new Set();
-  const sites = [];
-  const searchers = [
-    { name: 'DuckDuckGo', fn: searchDuckDuckGo },
-    { name: 'Bing', fn: searchBing }
-  ];
-
-  for (const query of queries) {
-    if (sites.length >= limit) break;
-    for (const searcher of searchers) {
-      if (sites.length >= limit) break;
-      onProgress({ type: 'status', message: `${searcher.name} searching: ${query}` });
-      const links = await searcher.fn(query, Math.max(10, limit));
-      for (const link of links) {
-        const host = hostOf(link);
-        if (!host || seenHosts.has(host)) continue;
-        seenHosts.add(host);
-        sites.push({ url: link, query: `${searcher.name}: ${query}` });
-        if (sites.length >= limit) break;
-      }
-      await sleep(SEARCH_DELAY_MS);
-    }
-  }
-
-  return sites;
-}
-
-function extractTitle(html, fallbackHost) {
-  const titleMatch = String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (!titleMatch) return fallbackHost || '';
-  let title = normalizeWhitespace(stripTags(titleMatch[1]));
-  title = title.replace(/\s*[\-|–|—|•]\s*(Home|Official Site|Homepage)\s*$/i, '');
-  title = title.replace(/\s*[\-|–|—]\s*.*?(Official Website|Home)\s*$/i, '');
-  if (title.length > 90) title = title.slice(0, 90).trim();
-  return title || fallbackHost || '';
-}
-
-function deobfuscateText(text) {
-  return String(text)
-    .replace(/\s*\[\s*at\s*\]\s*/gi, '@')
-    .replace(/\s*\(\s*at\s*\)\s*/gi, '@')
-    .replace(/\s+at\s+/gi, '@')
-    .replace(/\s*\[\s*dot\s*\]\s*/gi, '.')
-    .replace(/\s*\(\s*dot\s*\)\s*/gi, '.')
-    .replace(/\s+dot\s+/gi, '.');
-}
-
-function extractEmailsFromText(text) {
-  const clean = deobfuscateText(decodeHtmlEntities(String(text)));
-  const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,24}/gi;
-  const matches = clean.match(emailRegex) || [];
-  const badFragments = [
-    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js',
-    'example.com', 'domain.com', 'email.com', 'yourname@', 'name@',
-    'sentry.io', 'wixpress.com', 'shopify.com', 'wordpress.com',
-    'schema.org', 'cloudflare.com'
-  ];
-
-  const seen = new Set();
-  const emails = [];
-  for (let email of matches) {
-    email = email.toLowerCase().replace(/[.,;:)]+$/g, '');
-    if (badFragments.some(fragment => email.includes(fragment))) continue;
-    if (!email.includes('@') || seen.has(email)) continue;
-    seen.add(email);
-    emails.push(email);
-  }
-  return emails;
-}
-
-function classifyEmail(email) {
-  const local = email.split('@')[0].toLowerCase();
-  if (/^(sales|wholesale|dealer|dealers|distributor|distribution|procurement|purchasing|purchase|buyers?|orders?|export|trade|b2b|business)$/.test(local)) {
-    return 'high-value-business';
-  }
-  if (/^(info|contact|hello|office|admin|service|customerservice|enquiry|inquiry)$/.test(local)) {
-    return 'general-business';
-  }
-  if (/^(support|help|privacy|legal|abuse|security|noreply|no-reply|donotreply)$/.test(local)) {
-    return 'low-priority';
-  }
-  return 'other';
-}
-
-function selectPriorityEmail(emails) {
-  const score = email => {
-    const type = classifyEmail(email);
-    if (type === 'high-value-business') return 100;
-    if (type === 'general-business') return 70;
-    if (type === 'other') return 40;
-    return 10;
-  };
-  return [...emails].sort((a, b) => score(b) - score(a))[0] || '';
-}
-
-function extractPhonesFromText(text) {
-  const clean = normalizeWhitespace(stripTags(text));
-  const phoneRegex = /(?:\+\d{1,3}[\s().-]?)?(?:\(?\d{2,4}\)?[\s().-]?){2,5}\d{3,4}/g;
-  const matches = clean.match(phoneRegex) || [];
-  const seen = new Set();
-  const phones = [];
-  for (const raw of matches) {
-    const phone = raw.trim();
-    const digits = phone.replace(/\D/g, '');
-    if (digits.length < 7 || digits.length > 16) continue;
-    if (/^\d{4}$/.test(digits)) continue;
-    if (seen.has(phone)) continue;
-    seen.add(phone);
-    phones.push(phone);
-    if (phones.length >= 3) break;
-  }
-  return phones;
-}
-
-function extractCandidatePageLinks(baseUrl, html) {
-  const result = [];
-  const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  const words = [
-    'contact', 'about', 'impressum', 'imprint', 'legal',
-    'wholesale', 'dealer', 'distributor', 'trade', 'b2b',
-    'privacy', 'customer-service', 'support'
-  ];
-
-  let match;
-  while ((match = linkRegex.exec(html)) !== null) {
-    const href = decodeHtmlEntities(match[1] || '').trim();
-    const label = normalizeWhitespace(stripTags(match[2] || '')).toLowerCase();
-    const combined = `${href} ${label}`.toLowerCase();
-    if (!words.some(w => combined.includes(w))) continue;
-
-    try {
-      const url = new URL(href, baseUrl);
-      url.hash = '';
-      if (!/^https?:$/i.test(url.protocol)) continue;
-      if (hostOf(url.toString()) !== hostOf(baseUrl)) continue;
-      result.push(url.toString());
-    } catch {}
-  }
-
-  const seen = new Set();
-  return result.filter(url => {
-    if (seen.has(url)) return false;
-    seen.add(url);
-    return true;
-  }).slice(0, 6);
-}
-
-
-const CYCLING_TERMS = [
-  'bicycle','bicycles','bike','bikes','cycling','cycle','cycles','ebike','e-bike','mtb',
-  'road bike','mountain bike','gravel bike','bike parts','bicycle parts','cycling accessories',
-  'fahrrad','fahrräder','fahrradladen','radladen','rennrad','mountainbike','velo'
+const HARD_EXCLUDE_DOMAINS = [
+  'bing.com','microsoft.com','google.com','youtube.com','youtu.be','facebook.com','instagram.com','linkedin.com','x.com','twitter.com',
+  'wikipedia.org','amazon.','ebay.','reddit.com','quora.com','pinterest.','aliexpress.','alibaba.','temu.',
+  'cyclingnews.com','bikeradar.com','road.cc','pinkbike.com','singletracks.com','bikepacking.com','outsideonline.com',
+  'trekbikes.com','specialized.com','giant-bicycles.com','canyon.com','shimano.com','sram.com','garmin.com','cannondale.com',
+  'scott-sports.com','cube.eu','merida-bikes.com','pinarello.com','cervelo.com','bianchi.com','orbea.com','focus-bikes.com'
 ];
-const CHANNEL_TERMS = [
-  'shop','store','retailer','dealer','dealers','distributor','distribution','wholesale','wholesaler',
-  'reseller','stockist','importer','trade','b2b','parts','accessories','workshop','repair','service',
-  'laden','händler','haendler','vertrieb','grosshandel','großhandel'
+
+const CYCLING_POSITIVE = [
+  'bike shop','bicycle shop','cycle shop','cycling store','bike store','bicycle store','bike dealer','bicycle dealer','cycling dealer',
+  'bike distributor','bicycle distributor','cycling distributor','bike wholesale','bicycle wholesale','cycling wholesale','bike parts','bicycle parts','cycling accessories',
+  'fahrradladen','fahrradgeschäft','fahrrad handler','fahrrad händler','radladen','radsport','fahrrad zubehör','fahrradzubehör','fahrradteile',
+  'dealer','distributor','wholesale','wholesaler','retailer','shop','store','parts','accessories','zubehör','händler'
 ];
-const STRONG_NEGATIVE_TERMS = [
-  'microsoft','bing','software','privacy policy','terms of service','digital services act',
-  'support page','help center','login','careers','jobs','press release',
-  'news','magazine','review','reviews','blog','forum','best bike','top bike','buyers guide','buying guide','roundup','comparison'
+
+const NEGATIVE_WORDS = [
+  'news','magazine','review','blog','forum','wiki','support','help center','privacy policy only','press release','coupon','deal aggregator',
+  'marketplace','classifieds','youtube','podcast','software','digital services act'
 ];
-const KNOWN_BRAND_OR_MARKETPLACE_DOMAINS = [
-  'trekbikes.com','specialized.com','giant-bicycles.com','cannondale.com','canyon.com',
-  'shimano.com','sram.com','bosch-ebike.com','rei.com','bikesdirect.com',
-  'cyclingnews.com','bicycling.com','road.cc','bikeperfect.com','pinkbike.com','singletracks.com','bikeradar.com'
-];
-function includesAny(text, terms) {
-  const lower = String(text || '').toLowerCase();
-  return terms.some(term => lower.includes(term.toLowerCase()));
-}
-function locationTokens(location) {
-  const tokens = String(location || '').toLowerCase().split(/[^a-z0-9äöüß]+/i).map(t => t.trim()).filter(t => t.length >= 3);
-  if (/germany|deutschland|de\b/i.test(location || '')) tokens.push('germany','deutschland','german','berlin','.de');
-  return Array.from(new Set(tokens));
-}
-function scoreTargetFit({ lead, allText, location }) {
-  const host = hostOf(lead.website || '');
-  const title = lead.business_name || '';
-  const text = `${title} ${host} ${lead.website || ''} ${allText || ''}`.toLowerCase();
-  const titleHost = `${title} ${host}`.toLowerCase();
-  let score = 0;
-  const notes = [];
-  if (includesAny(titleHost, CYCLING_TERMS)) { score += 35; notes.push('cycling in title/domain'); }
-  else if (includesAny(text, CYCLING_TERMS)) { score += 25; notes.push('cycling content'); }
-  if (includesAny(titleHost, CHANNEL_TERMS)) { score += 30; notes.push('dealer/shop/distributor in title/domain'); }
-  else if (includesAny(text, CHANNEL_TERMS)) { score += 20; notes.push('dealer/shop/distributor content'); }
-  const locTokens = locationTokens(location);
-  let locHit = false;
-  for (const token of locTokens) {
-    if (token === '.de' && host.endsWith('.de')) locHit = true;
-    else if (token !== '.de' && text.includes(token)) locHit = true;
-  }
-  if (locHit) { score += 25; notes.push('location match'); }
-  else if (location) { score -= 20; notes.push('weak location match'); }
-  if (lead.priority_email && classifyEmail(lead.priority_email) !== 'low-priority') score += 10;
-  if (includesAny(text.slice(0, 5000), STRONG_NEGATIVE_TERMS)) { score -= 50; notes.push('irrelevant/support/tech signals'); }
-  if (KNOWN_BRAND_OR_MARKETPLACE_DOMAINS.some(d => host === d || host.endsWith('.' + d))) { score -= 35; notes.push('likely brand/marketplace, not dealer/distributor'); }
-  score = Math.max(0, Math.min(100, score));
-  let category = 'needs-review';
-  if (score >= 75) category = 'strong cycling dealer/distributor fit';
-  else if (score >= 50) category = 'possible cycling channel lead';
-  else category = 'low relevance';
-  return { score, notes: notes.join(', '), category };
-}
 
-function calculateLeadScore({ website, phone, emails, priorityEmail, allText }) {
-  let score = 0;
-  if (website) score += 20;
-  if (phone) score += 10;
-  if (emails.length) score += 30;
-  if (priorityEmail) {
-    const type = classifyEmail(priorityEmail);
-    if (type === 'high-value-business') score += 20;
-    if (type === 'general-business') score += 10;
-  }
-  if (/\b(wholesale|distributor|dealer|b2b|trade|procurement|export)\b/i.test(allText || '')) score += 20;
-  return Math.min(score, 100);
-}
-
-async function analyzeWebsite(site, context = {}) {
-  const homepage = await fetchText(site.url);
-  const finalUrl = homepage.url || site.url;
-  const host = hostOf(finalUrl);
-  const pagesVisited = [];
-  const allEmails = new Set();
-  let phone = '';
-  let contactPageUrl = '';
-  let title = host;
-  let notes = [];
-
-  if (!homepage.ok || !/text\/html|application\/xhtml|text\/plain/i.test(homepage.contentType)) {
-    return {
-      business_name: host || site.url,
-      website: finalUrl,
-      phone: '',
-      emails: [],
-      priority_email: '',
-      email_type: '',
-      contact_page_url: '',
-      source: site.query,
-      lead_score: 0,
-      target_fit_score: 0,
-      target_category: 'fetch failed',
-      target_notes: '',
-      notes: homepage.error ? `Could not fetch homepage: ${homepage.error}` : `Homepage HTTP ${homepage.status}`,
-      do_not_contact: false,
-      created_at: new Date().toISOString()
-    };
-  }
-
-  pagesVisited.push(finalUrl);
-  title = extractTitle(homepage.text, host);
-  let combinedText = stripTags(homepage.text);
-  for (const email of extractEmailsFromText(homepage.text)) allEmails.add(email);
-  const homePhones = extractPhonesFromText(homepage.text);
-  if (homePhones[0]) phone = homePhones[0];
-
-  const contactLinks = extractCandidatePageLinks(finalUrl, homepage.text);
-  for (const link of contactLinks) {
-    await sleep(PAGE_DELAY_MS);
-    const page = await fetchText(link);
-    if (!page.ok) continue;
-    pagesVisited.push(page.url || link);
-    const text = page.text || '';
-    combinedText += '\n' + stripTags(text);
-    const pageEmails = extractEmailsFromText(text);
-    if (pageEmails.length && !contactPageUrl) contactPageUrl = page.url || link;
-    for (const email of pageEmails) allEmails.add(email);
-    if (!phone) {
-      const pagePhones = extractPhonesFromText(text);
-      if (pagePhones[0]) phone = pagePhones[0];
-    }
-  }
-
-  const emails = Array.from(allEmails);
-  const priority = selectPriorityEmail(emails);
-  const emailType = priority ? classifyEmail(priority) : '';
-  if (!emails.length) notes.push('No public email found on checked pages');
-  if (!phone) notes.push('No phone found on website');
-  if (pagesVisited.length > 1) notes.push(`Checked ${pagesVisited.length} pages`);
-
-  const website = finalUrl;
-  const lead_score = calculateLeadScore({ website, phone, emails, priorityEmail: priority, allText: combinedText });
-  const baseLead = {
-    business_name: title,
-    website,
-    phone,
-    emails,
-    priority_email: priority,
-    email_type: emailType,
-    contact_page_url: contactPageUrl,
-    source: site.query,
-    lead_score,
-    notes: notes.join('; '),
-    do_not_contact: false,
-    created_at: new Date().toISOString()
-  };
-  const fit = scoreTargetFit({ lead: baseLead, allText: combinedText, location: context.location || '' });
-  baseLead.target_fit_score = fit.score;
-  baseLead.target_category = fit.category;
-  baseLead.target_notes = fit.notes;
-  baseLead.lead_score = Math.round((lead_score * 0.45) + (fit.score * 0.55));
-  return baseLead;
-}
-
-function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk;
-      if (data.length > 1024 * 1024) {
-        reject(new Error('Request body too large'));
-        req.destroy();
-      }
-    });
-    req.on('end', () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (error) {
-        reject(error);
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-const INDEX_HTML = `<!doctype html>
+function htmlPage() {
+  return `<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>B2B Lead Scraper - Free</title>
-  <style>
-    :root { font-family: Arial, "Microsoft YaHei", sans-serif; color: #1f2937; background: #f7f7fb; }
-    body { margin: 0; }
-    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 18px 48px; }
-    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 18px; box-shadow: 0 8px 24px rgba(15,23,42,.06); padding: 22px; margin-bottom: 18px; }
-    h1 { margin: 0 0 8px; font-size: 28px; }
-    .sub { margin: 0; color: #6b7280; line-height: 1.6; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr 140px auto; gap: 12px; align-items: end; margin-top: 18px; }
-    label { display: block; font-size: 13px; color: #4b5563; margin-bottom: 6px; }
-    input, select { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 12px; padding: 11px 12px; font-size: 15px; background:#fff; }
-    .filter-box { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
-    .filter-grid { display:grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap:10px; align-items:end; }
-    .checks { display:flex; flex-wrap:wrap; gap:12px; margin-top:10px; font-size:13px; color:#374151; }
-    .checks label { display:flex; align-items:center; gap:6px; margin:0; }
-    .checks input { width:auto; }
-    .tiny { font-size:12px; color:#6b7280; margin-top:6px; }
-    button { border: 0; border-radius: 12px; padding: 12px 16px; background: #111827; color: #fff; cursor: pointer; font-size: 15px; }
-    button.secondary { background: #374151; }
-    button:disabled { opacity: .55; cursor: not-allowed; }
-    .status { margin-top: 14px; font-size: 14px; color: #4b5563; min-height: 22px; }
-    .bar { height: 10px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin-top: 12px; }
-    .fill { height: 100%; width: 0%; background: #111827; transition: width .25s; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 10px 8px; border-bottom: 1px solid #eef0f3; vertical-align: top; text-align: left; }
-    th { background: #f9fafb; position: sticky; top: 0; z-index: 1; }
-    .table-wrap { max-height: 560px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 14px; }
-    .pill { display:inline-block; padding: 3px 8px; border-radius: 999px; background:#eef2ff; color:#3730a3; font-size:12px; }
-    .muted { color:#6b7280; }
-    .note { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; border-radius:14px; padding:12px 14px; margin-top:14px; font-size:14px; line-height:1.55; }
-    a { color: #2563eb; text-decoration: none; }
-    @media (max-width: 850px) { .grid, .filter-grid { grid-template-columns: 1fr; } }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>骑行配件 B2B 线索采集工具 - v5</title>
+<style>
+  :root{--bg:#f6f7fb;--card:#fff;--text:#0f172a;--muted:#64748b;--line:#e2e8f0;--dark:#111827;--blue:#2563eb;--orange:#c2410c;--green:#047857;--red:#b91c1c;}
+  *{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{max-width:1360px;margin:28px auto;padding:0 18px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 12px 36px rgba(15,23,42,.06);padding:22px;margin-bottom:18px}
+  h1{font-size:28px;margin:0 0 8px}.sub{color:var(--muted);font-size:15px}.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;font-size:12px;margin-left:8px}
+  .warn{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:12px;padding:12px 14px;margin:16px 0;line-height:1.5}.grid{display:grid;grid-template-columns:1.2fr 1fr 170px 120px;gap:14px;align-items:end}
+  label{font-size:13px;color:#334155;display:block;margin-bottom:6px} input,textarea,select{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:12px 13px;font-size:15px;background:#fff} textarea{min-height:78px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  button{border:0;border-radius:12px;background:var(--dark);color:#fff;padding:13px 18px;font-size:16px;cursor:pointer}button:disabled{background:#9ca3af;cursor:not-allowed}.btn2{background:#475569}.btnDanger{background:#991b1b}.btnLight{background:#e2e8f0;color:#0f172a}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.status{margin-top:12px;color:#334155}.bar{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden;margin-top:8px}.bar>div{height:100%;width:0;background:#111827;transition:width .2s}
+  .filters{display:grid;grid-template-columns:1.1fr 180px 120px 120px 180px 1fr;gap:10px;align-items:end}.checks{margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:#475569}.checks label{display:flex;align-items:center;gap:5px;margin:0}.checks input{width:auto}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:13px}th,td{border-bottom:1px solid var(--line);padding:10px;vertical-align:top;text-align:left}th{background:#f8fafc;font-weight:700}tr:last-child td{border-bottom:0}.score{display:inline-block;border-radius:999px;background:#eef2ff;color:#3730a3;padding:3px 8px}.match{font-size:12px;color:#0f766e}.small{font-size:12px;color:#64748b}.email{font-weight:700}.scroll{overflow:auto;max-height:560px}.right{margin-left:auto}.muted{color:#64748b}.ok{color:var(--green)}.bad{color:var(--red)}.pill{display:inline-block;padding:2px 7px;background:#f1f5f9;border-radius:999px;margin:1px;font-size:12px}.topline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.version{font-weight:600;color:#475569}
+  @media(max-width:900px){.grid,.filters{grid-template-columns:1fr}.right{margin-left:0}}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>骑行配件 B2B 线索采集工具 - 筛选版</h1>
-      <p class="sub">专门用于寻找自行车店、骑行店、配件经销商、批发商和分销商官网，并从公开页面提取邮箱和电话。</p>
-      <div class="note">说明：免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。系统会过滤 Microsoft/搜索引擎帮助页、品牌官网、无关平台等低相关结果。免费版仍依赖公开搜索结果；如果搜索不准，建议直接粘贴官网列表。</div>
-      <div style="margin-top:16px;">
-        <label>可选：直接粘贴官网列表，一行一个。填了这里会优先分析这些网站，不依赖公开搜索。</label>
-        <textarea id="websites" placeholder="例如：&#10;https://example-bike-shop.de&#10;https://example-distributor.com" style="width:100%; box-sizing:border-box; min-height:76px; border:1px solid #d1d5db; border-radius:12px; padding:11px 12px; font-size:14px; resize:vertical;"></textarea>
-      </div>
-      <div class="grid">
-        <div>
-          <label>行业关键词</label>
-          <input id="keyword" placeholder="例如 bike dealer / bicycle shop / cycling accessories distributor" value="bike dealer">
-        </div>
-        <div>
-          <label>地区</label>
-          <input id="location" placeholder="例如 Berlin Germany" value="Berlin Germany">
-        </div>
-        <div>
-          <label>目标数量</label>
-          <input id="limit" type="number" min="1" max="80" value="20">
-        </div>
-        <div>
-          <button id="startBtn">开始提取</button>
-        </div>
-      </div>
-      <div class="status" id="status">准备就绪</div>
-      <div class="bar"><div class="fill" id="fill"></div></div>
-    </div>
+<div class="wrap">
+  <div class="card">
+    <div class="topline"><h1>骑行配件 B2B 线索采集工具 - 筛选版</h1><span class="badge">${VERSION}</span></div>
+    <div class="sub">专门寻找自行车店、骑行店、配件经销商、批发商和分销商官网，并从公开页面提取邮箱和电话。</div>
+    <div class="warn">说明：免费版不调用 Google Maps/Places，所以没有稳定地图商家电话、地址和前 100 商家保证。v5 增加了超时、防卡顿和停止按钮；如果公开搜索不准，建议直接粘贴官网列表。</div>
 
-    <div class="card">
-      <div style="display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:12px;">
-        <div><strong>结果</strong> <span class="muted" id="count">0 条</span></div>
-        <button class="secondary" id="downloadBtn" disabled>下载筛选后 CSV</button>
-      </div>
-      <div class="filter-box">
-        <div style="font-weight:700; margin-bottom:10px;">筛选结果</div>
-        <div class="filter-grid">
-          <div>
-            <label>搜索结果内关键词</label>
-            <input id="filterText" placeholder="例如 berlin / distributor / shop">
-          </div>
-          <div>
-            <label>线索类型</label>
-            <select id="filterType">
-              <option value="channel" selected>店/经销商/分销商</option>
-              <option value="shop">只看门店/零售店</option>
-              <option value="dealer">只看经销商/Dealer</option>
-              <option value="distributor">只看分销商/Distributor</option>
-              <option value="wholesale">只看批发/Wholesale</option>
-              <option value="all">不限</option>
-            </select>
-          </div>
-          <div>
-            <label>最低总分</label>
-            <input id="minScore" type="number" min="0" max="100" value="50">
-          </div>
-          <div>
-            <label>最低匹配度</label>
-            <input id="minFit" type="number" min="0" max="100" value="45">
-          </div>
-          <div>
-            <label>匹配等级</label>
-            <select id="fitCategory">
-              <option value="all">不限</option>
-              <option value="strong">强匹配</option>
-              <option value="possible" selected>强匹配 + 可能匹配</option>
-            </select>
-          </div>
-          <div>
-            <label>排除关键词</label>
-            <input id="excludeText" value="microsoft,bing,cyclingnews,magazine,news,review,forum,wikipedia,amazon,ebay">
-          </div>
-        </div>
-        <div class="checks">
-          <label><input id="requireEmail" type="checkbox" checked> 只看有邮箱</label>
-          <label><input id="requirePhone" type="checkbox"> 只看有电话</label>
-          <label><input id="strictLocation" type="checkbox" checked> 地区相关 / 德国站优先</label>
-          <label><input id="hideMedia" type="checkbox" checked> 隐藏新闻/测评/论坛/平台页</label>
-          <label><input id="sortByScore" type="checkbox" checked> 按分数排序</label>
-        </div>
-        <div class="tiny">提示：如果你要找德国本地客户，建议关键词用 Fahrradladen、Fahrrad Händler、bike dealer、bicycle parts distributor，并保持“地区相关”开启。</div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>分数</th>
-              <th>匹配度</th>
-              <th>公司/网站</th>
-              <th>电话</th>
-              <th>优先邮箱</th>
-              <th>全部邮箱</th>
-              <th>Contact 页面</th>
-              <th>备注</th>
-            </tr>
-          </thead>
-          <tbody id="tbody"></tbody>
-        </table>
-      </div>
+    <label>可选：直接粘贴官网列表，一行一个。填了这里会优先分析这些网站，不依赖公开搜索。</label>
+    <textarea id="manualUrls" placeholder="例如：\nhttps://example-bike-shop.de\nhttps://example-distributor.com"></textarea>
+
+    <div class="grid" style="margin-top:14px">
+      <div><label>行业关键词</label><input id="keyword" value="bike dealer" /></div>
+      <div><label>地区</label><input id="location" value="Berlin Germany" /></div>
+      <div><label>目标数量</label><input id="target" type="number" min="1" max="50" value="20" /></div>
+      <div><button id="startBtn">开始提取</button></div>
     </div>
+    <div class="row" style="margin-top:10px"><button id="stopBtn" class="btnDanger" disabled>停止</button><button id="clearBtn" class="btnLight">清空结果</button><span id="elapsed" class="small"></span></div>
+    <div id="status" class="status">准备就绪</div>
+    <div class="bar"><div id="bar"></div></div>
   </div>
 
+  <div class="card">
+    <div class="row"><h2 style="margin:0;font-size:20px">结果 <span id="resultCount" class="muted">0</span> 条</h2><button id="downloadBtn" class="btn2 right" disabled>下载筛选后 CSV</button></div>
+    <div class="card" style="box-shadow:none;margin:14px 0 12px;padding:14px;background:#fbfdff">
+      <b>筛选结果</b>
+      <div class="filters" style="margin-top:10px">
+        <div><label>搜索结果内关键词</label><input id="filterText" placeholder="例如 berlin / distributor" /></div>
+        <div><label>线索类型</label><select id="typeFilter"><option value="all">全部</option><option value="shop">店/车店</option><option value="dealer">经销商</option><option value="distributor">分销商</option><option value="wholesale">批发/Wholesale</option></select></div>
+        <div><label>最低总分</label><input id="minScore" type="number" value="50" /></div>
+        <div><label>最低匹配度</label><input id="minMatch" type="number" value="45" /></div>
+        <div><label>匹配等级</label><select id="matchLevel"><option value="possible">强匹配 + 可能匹配</option><option value="strong">只看强匹配</option><option value="all">全部</option></select></div>
+        <div><label>排除关键词</label><input id="excludeWords" value="microsoft,bing,cyclingnews,bikeradar,magazine,news,blog,forum,review" /></div>
+      </div>
+      <div class="checks">
+        <label><input id="onlyEmail" type="checkbox" checked />只看有邮箱</label>
+        <label><input id="onlyPhone" type="checkbox" />只看有电话</label>
+        <label><input id="preferRegion" type="checkbox" checked />地区相关 / 德国站优先</label>
+        <label><input id="hideIrrelevant" type="checkbox" checked />隐藏新闻/测评/论坛/平台页</label>
+        <label><input id="sortScore" type="checkbox" checked />按分数排序</label>
+      </div>
+    </div>
+    <div class="scroll"><table><thead><tr><th>分数</th><th>匹配度</th><th>类型</th><th style="min-width:250px">公司/网站</th><th>电话</th><th style="min-width:190px">优先邮箱</th><th style="min-width:220px">全部邮箱</th><th>Contact 页面</th><th>备注</th></tr></thead><tbody id="tbody"></tbody></table></div>
+  </div>
+</div>
 <script>
-const rows = [];
-const startBtn = document.getElementById('startBtn');
-const downloadBtn = document.getElementById('downloadBtn');
-const tbody = document.getElementById('tbody');
-const statusEl = document.getElementById('status');
-const countEl = document.getElementById('count');
-const fillEl = document.getElementById('fill');
+let allResults = [];
+let aborter = null;
+let startedAt = 0;
+let timer = null;
+const $ = id => document.getElementById(id);
 
-function esc(s) {
-  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function setStatus(text){ $('status').textContent = text; }
+function setBar(p){ $('bar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function domainFromUrl(u){ try{return new URL(u).hostname.replace(/^www\./,'')}catch{return ''} }
+function startTimer(){ startedAt = Date.now(); clearInterval(timer); timer=setInterval(()=>{$('elapsed').textContent='已运行 '+Math.round((Date.now()-startedAt)/1000)+' 秒';},1000); }
+function stopTimer(){ clearInterval(timer); $('elapsed').textContent=''; }
+
+function getFilters(){ return {
+  text: $('filterText').value.trim().toLowerCase(), type: $('typeFilter').value, minScore: Number($('minScore').value || 0), minMatch: Number($('minMatch').value || 0), matchLevel: $('matchLevel').value,
+  excludeWords: $('excludeWords').value.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean), onlyEmail: $('onlyEmail').checked, onlyPhone: $('onlyPhone').checked, preferRegion: $('preferRegion').checked, hideIrrelevant: $('hideIrrelevant').checked, sortScore: $('sortScore').checked
+};}
+function passes(r){ const f=getFilters(); const hay=[r.title,r.url,r.type,r.notes,(r.emails||[]).join(' ')].join(' ').toLowerCase();
+  if(f.text && !hay.includes(f.text)) return false;
+  if(f.excludeWords.some(w=>hay.includes(w))) return false;
+  if(f.type !== 'all' && r.type !== f.type) return false;
+  if((r.score||0) < f.minScore) return false;
+  if((r.match||0) < f.minMatch) return false;
+  if(f.matchLevel === 'strong' && (r.match||0) < 70) return false;
+  if(f.onlyEmail && !(r.emails||[]).length) return false;
+  if(f.onlyPhone && !(r.phones||[]).length) return false;
+  if(f.hideIrrelevant && r.irrelevant) return false;
+  return true; }
+function render(){ let rows = allResults.filter(passes); if(getFilters().sortScore) rows.sort((a,b)=>(b.score||0)-(a.score||0)); $('resultCount').textContent = rows.length; $('downloadBtn').disabled = rows.length === 0;
+  $('tbody').innerHTML = rows.map(r=>`<tr><td><span class="score">${esc(r.score)}</span></td><td><span class="match">${esc(r.match)}</span></td><td>${esc(labelType(r.type))}</td><td><b>${esc(r.title || domainFromUrl(r.url))}</b><br><a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a><br>${(r.tags||[]).map(t=>`<span class="pill">${esc(t)}</span>`).join('')}</td><td>${esc((r.phones||[]).slice(0,2).join('; '))}</td><td><span class="email">${esc(r.priorityEmail||'')}</span><br><span class="small">${esc(r.emailType||'')}</span></td><td>${esc((r.emails||[]).join('; '))}</td><td>${r.contactUrl?`<a href="${esc(r.contactUrl)}" target="_blank">打开</a>`:''}</td><td class="small">${esc(r.notes||'')}</td></tr>`).join(''); }
+function labelType(t){ return {shop:'店/车店',dealer:'经销商',distributor:'分销商',wholesale:'批发'}[t] || t || ''; }
+['filterText','typeFilter','minScore','minMatch','matchLevel','excludeWords','onlyEmail','onlyPhone','preferRegion','hideIrrelevant','sortScore'].forEach(id => $(id).addEventListener('input', render));
+$('clearBtn').onclick=()=>{allResults=[]; render(); setStatus('已清空'); setBar(0);};
+$('stopBtn').onclick=()=>{ if(aborter){ aborter.abort(); setStatus('已停止'); $('startBtn').disabled=false; $('stopBtn').disabled=true; stopTimer(); }};
+$('downloadBtn').onclick=()=>{ const rows=allResults.filter(passes); const headers=['score','match','type','title','url','phones','priorityEmail','emailType','emails','contactUrl','notes']; const csv=[headers.join(',')].concat(rows.map(r=>headers.map(h=>csvCell(Array.isArray(r[h])?r[h].join('; '):(r[h]||''))).join(','))).join('\n'); const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='cycling_b2b_leads.csv'; a.click(); URL.revokeObjectURL(a.href); };
+function csvCell(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }
+
+$('startBtn').onclick = async () => {
+  allResults = []; render(); setBar(0); $('startBtn').disabled=true; $('stopBtn').disabled=false; startTimer();
+  aborter = new AbortController();
+  const payload = { keyword:$('keyword').value, location:$('location').value, target:Number($('target').value||20), manualUrls:$('manualUrls').value, filters:getFilters() };
+  try{
+    const resp = await fetch('/api/search', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), signal:aborter.signal });
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    const reader = resp.body.getReader(); const decoder = new TextDecoder(); let buf='';
+    while(true){ const {value,done}=await reader.read(); if(done) break; buf += decoder.decode(value,{stream:true}); const lines=buf.split('\n'); buf=lines.pop(); for(const line of lines){ if(!line.trim()) continue; const msg=JSON.parse(line); handleMsg(msg); } }
+    if(buf.trim()) handleMsg(JSON.parse(buf));
+  }catch(e){ if(e.name !== 'AbortError') setStatus('出错：'+e.message); }
+  finally{ $('startBtn').disabled=false; $('stopBtn').disabled=true; stopTimer(); }
+};
+function handleMsg(msg){ if(msg.type==='status'){ setStatus(msg.text); if(msg.progress!=null) setBar(msg.progress); } if(msg.type==='lead'){ allResults.push(msg.lead); render(); } if(msg.type==='done'){ setStatus(msg.text); setBar(100); render(); } if(msg.type==='warn'){ setStatus(msg.text); } }
+</script>
+</body></html>`;
 }
 
-function setStatus(msg) {
-  statusEl.textContent = msg || '';
+function send(res, status, body, type='text/html; charset=utf-8') { res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); }
+function json(res, status, obj) { send(res, status, JSON.stringify(obj), 'application/json; charset=utf-8'); }
+async function readBody(req) { return new Promise((resolve, reject) => { let data=''; req.on('data', c => { data += c; if (data.length > 2_000_000) { reject(new Error('Body too large')); req.destroy(); } }); req.on('end', () => resolve(data)); req.on('error', reject); }); }
+
+function normalizeUrl(u) {
+  u = String(u || '').trim(); if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try { const x = new URL(u); x.hash=''; return x.toString(); } catch { return ''; }
+}
+function host(u){ try{return new URL(u).hostname.replace(/^www\./,'').toLowerCase()}catch{return ''} }
+function isHardExcluded(u){ const h=host(u); return HARD_EXCLUDE_DOMAINS.some(d => h.includes(d.replace('.', '').length < 5 ? d : d)); }
+function stripHtml(html){ return String(html||'').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim(); }
+function decodeEntities(s){ return String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>'); }
+function titleFromHtml(html){ const m=String(html||'').match(/<title[^>]*>([\s\S]*?)<\/title>/i); return decodeEntities(stripHtml(m ? m[1] : '')).slice(0,140); }
+function uniq(arr){ return [...new Set(arr.filter(Boolean))]; }
+function includesAny(text, words){ text=String(text||'').toLowerCase(); return words.some(w=>text.includes(w)); }
+
+async function fetchText(url, timeoutMs=8000) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8,de;q=0.7' }, signal: ctrl.signal, redirect: 'follow' });
+    const text = await resp.text();
+    return { ok: resp.ok, status: resp.status, url: resp.url || url, text: text.slice(0, 650000) };
+  } catch(e) { return { ok:false, status:0, url, text:'', error:e.name === 'AbortError' ? 'timeout' : e.message }; }
+  finally { clearTimeout(t); }
 }
 
-let filteredRows = [];
-
-function leadText(row) {
-  return [
-    row.business_name, row.website, row.phone, row.priority_email,
-    (row.emails || []).join(' '), row.email_type, row.target_category,
-    row.target_notes, row.notes
-  ].join(' ').toLowerCase();
+function extractEmails(text) {
+  const raw = String(text||'')
+    .replace(/\s*\[at\]\s*/gi,'@').replace(/\s*\(at\)\s*/gi,'@').replace(/\s+at\s+/gi,'@')
+    .replace(/\s*\[dot\]\s*/gi,'.').replace(/\s*\(dot\)\s*/gi,'.').replace(/\s+dot\s+/gi,'.');
+  const m = raw.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
+  return uniq(m.map(e => e.toLowerCase().replace(/^mailto:/,'').replace(/[),.;]+$/,''))).filter(e => !/\.(png|jpg|jpeg|gif|webp|svg|css|js)$/i.test(e));
 }
-
-function splitWords(value) {
-  return String(value || '').split(/[,;，、\n]+/).map(function(s) { return s.trim().toLowerCase(); }).filter(Boolean);
+function extractPhones(text) {
+  const m = String(text||'').match(/(?:\+\d{1,3}[\s().-]?)?(?:\(?\d{2,5}\)?[\s().-]?){2,5}\d{2,5}/g) || [];
+  return uniq(m.map(p => p.replace(/\s+/g,' ').trim()).filter(p => (p.match(/\d/g)||[]).length >= 7 && (p.match(/\d/g)||[]).length <= 18)).slice(0,4);
 }
-
-function typeMatches(row, type) {
-  if (type === 'all') return true;
-  const text = leadText(row);
-  const sets = {
-    channel: ['shop','store','retailer','dealer','distributor','wholesale','wholesaler','händler','haendler','laden','vertrieb','grosshandel','großhandel','b2b','trade'],
-    shop: ['shop','store','retailer','fahrradladen','radladen','laden','workshop','repair'],
-    dealer: ['dealer','dealers','händler','haendler','reseller','stockist'],
-    distributor: ['distributor','distribution','vertrieb','importer','export'],
-    wholesale: ['wholesale','wholesaler','grosshandel','großhandel','b2b','trade']
-  };
-  return (sets[type] || []).some(function(w) { return text.includes(w); });
+function chooseEmail(emails) {
+  const order = ['sales@','wholesale@','dealer@','b2b@','trade@','export@','info@','contact@','hello@','order@','shop@','service@'];
+  for (const key of order) { const found = emails.find(e => e.startsWith(key)); if (found) return found; }
+  return emails[0] || '';
 }
-
-function locationMatches(row) {
-  const loc = document.getElementById('location').value.toLowerCase();
-  if (!loc.trim()) return true;
-  const rowText = [row.business_name, row.website, row.target_notes, row.notes].join(' ').toLowerCase();
-  const host = (function() { try { return new URL(row.website).hostname.toLowerCase(); } catch (e) { return ''; } })();
-  const tokens = loc.split(/[^a-z0-9äöüß]+/i).filter(function(t) { return t.length >= 3; });
-  if (/germany|deutschland|de\b/i.test(loc) && host.endsWith('.de')) return true;
-  return tokens.some(function(t) { return rowText.includes(t); });
+function emailType(email) {
+  if (!email) return '';
+  if (/^(sales|wholesale|dealer|b2b|trade|export)@/.test(email)) return 'high-value-business';
+  if (/^(info|contact|hello|shop|order)@/.test(email)) return 'general-business';
+  if (/^(privacy|abuse|noreply|no-reply|support)@/.test(email)) return 'low-priority';
+  return 'other';
 }
-
-function rowPassesFilters(row) {
-  const text = leadText(row);
-  const search = document.getElementById('filterText').value.trim().toLowerCase();
-  if (search && !text.includes(search)) return false;
-
-  const minScore = Number(document.getElementById('minScore').value || 0);
-  const minFit = Number(document.getElementById('minFit').value || 0);
-  if (Number(row.lead_score || 0) < minScore) return false;
-  if (Number(row.target_fit_score || 0) < minFit) return false;
-
-  const cat = document.getElementById('fitCategory').value;
-  const target = String(row.target_category || '').toLowerCase();
-  if (cat === 'strong' && !target.includes('strong')) return false;
-  if (cat === 'possible' && !(target.includes('strong') || target.includes('possible'))) return false;
-
-  if (!typeMatches(row, document.getElementById('filterType').value)) return false;
-  if (document.getElementById('requireEmail').checked && !(row.emails || []).length) return false;
-  if (document.getElementById('requirePhone').checked && !row.phone) return false;
-  if (document.getElementById('strictLocation').checked && !locationMatches(row)) return false;
-
-  if (document.getElementById('hideMedia').checked) {
-    const mediaWords = ['news','magazine','review','reviews','blog','forum','wiki','best bike','top bike','buying guide','buyers guide','comparison','youtube','facebook','instagram'];
-    if (mediaWords.some(function(w) { return text.includes(w); })) return false;
+function extractLinks(base, html) {
+  const links = []; const re = /href=["']([^"'#]+)["']/gi; let m;
+  while ((m = re.exec(html))) {
+    let href = decodeEntities(m[1]); if (/^(mailto:|tel:|javascript:)/i.test(href)) continue;
+    try { links.push(new URL(href, base).toString()); } catch {}
   }
+  return uniq(links).filter(u => host(u) === host(base));
+}
+function contactLinks(base, html) {
+  const keys = ['contact','kontakt','impressum','about','ueber','über','haendler','händler','dealer','trade','b2b','wholesale','distributor','distribution','partner','retail','shop','store'];
+  return extractLinks(base, html).filter(u => includesAny(u, keys)).slice(0,6);
+}
 
-  const exclude = splitWords(document.getElementById('excludeText').value);
-  if (exclude.some(function(w) { return text.includes(w); })) return false;
+async function searchBing(query, limit) {
+  const url = 'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&count=30';
+  const r = await fetchText(url, 9000);
+  if (!r.text) return [];
+  const urls = [];
+  const patterns = [/href="(https?:\/\/[^"<>]+)"/gi, /<a[^>]+href="(https?:\/\/[^"<>]+)"[^>]*>/gi];
+  for (const pat of patterns) { let m; while ((m = pat.exec(r.text))) urls.push(decodeEntities(m[1])); }
+  return cleanCandidates(urls).slice(0, limit);
+}
+async function searchDuck(query, limit) {
+  const url = 'https://duckduckgo.com/html/?q=' + encodeURIComponent(query);
+  const r = await fetchText(url, 9000);
+  if (!r.text) return [];
+  const urls = []; let m; const re = /uddg=([^&"']+)/g;
+  while ((m = re.exec(r.text))) { try { urls.push(decodeURIComponent(m[1])); } catch {} }
+  const re2 = /class="result__a"[^>]+href="([^"]+)"/g;
+  while ((m = re2.exec(r.text))) { try { urls.push(new URL(decodeEntities(m[1]), 'https://duckduckgo.com').searchParams.get('uddg') || decodeEntities(m[1])); } catch {} }
+  return cleanCandidates(urls).slice(0, limit);
+}
+function cleanCandidates(urls) {
+  const out = [];
+  for (let u of urls) {
+    u = normalizeUrl(u); if (!u) continue;
+    try { const x = new URL(u); if (!/^https?:$/.test(x.protocol)) continue; x.hash=''; if (isHardExcluded(x.toString())) continue; out.push(x.toString()); } catch {}
+  }
+  const seenHost = new Set(); const result=[];
+  for (const u of out) { const h=host(u); if (!h || seenHost.has(h)) continue; seenHost.add(h); result.push(u); }
+  return result;
+}
+function buildQueries(keyword, location) {
+  const k = keyword || 'bike dealer'; const l = location || '';
+  const local = /germany|berlin|deutschland/i.test(l);
+  const qs = [
+    `${k} ${l}`,
+    `${k} ${l} contact email`,
+    `bike shop dealer distributor ${l}`,
+    `bicycle parts distributor ${l}`,
+    `cycling accessories wholesale ${l}`
+  ];
+  if (local) qs.push(`Fahrradladen ${l}`, `Fahrrad Händler ${l}`, `Fahrradzubehör Händler ${l}`, `site:.de Fahrrad Händler ${l}`);
+  return uniq(qs);
+}
+function classifyAndScore({url,title,text,emails,phones,location}) {
+  const hay = `${url} ${title} ${text}`.toLowerCase(); const h=host(url);
+  let score = 20, match = 10; const tags=[];
+  if (emails.length) { score += 25; tags.push('email'); }
+  if (phones.length) { score += 10; tags.push('phone'); }
+  const positives = CYCLING_POSITIVE.filter(w => hay.includes(w));
+  match += Math.min(55, positives.length * 8); score += Math.min(35, positives.length * 5);
+  if (positives.length) tags.push(...positives.slice(0,4));
+  const loc = String(location||'').toLowerCase();
+  const regionHit = (loc.includes('germany') && (h.endsWith('.de') || hay.includes('germany') || hay.includes('deutschland'))) || (loc.includes('berlin') && hay.includes('berlin'));
+  if (regionHit) { score += 12; match += 10; tags.push('region'); }
+  let type = 'shop';
+  if (/(distributor|distribution|importer|großhandel|grosshandel)/i.test(hay)) { type='distributor'; score += 12; match += 12; }
+  else if (/(wholesale|wholesaler|b2b|trade|bulk|großhandel|grosshandel)/i.test(hay)) { type='wholesale'; score += 12; match += 12; }
+  else if (/(dealer|händler|handler|partner)/i.test(hay)) { type='dealer'; score += 10; match += 10; }
+  const irrelevant = includesAny(hay, NEGATIVE_WORDS) || isHardExcluded(url);
+  if (irrelevant) { score -= 40; match -= 35; tags.push('possible-irrelevant'); }
+  if (/(official|manufacturer|brand|global)/i.test(hay) && !/(dealer|store|shop|retail)/i.test(hay)) { score -= 20; match -= 15; }
+  score = Math.max(0, Math.min(100, score)); match = Math.max(0, Math.min(100, match));
+  return {score, match, type, tags: uniq(tags).slice(0,8), irrelevant};
+}
+
+async function analyzeSite(url, location) {
+  const home = await fetchText(url, 8500);
+  if (!home.ok && !home.text) return { url, title: host(url), score: 0, match: 0, type:'', emails:[], phones:[], priorityEmail:'', emailType:'', contactUrl:'', tags:[], irrelevant:false, notes:`Homepage ${home.error || ('HTTP '+home.status)}` };
+  const finalUrl = normalizeUrl(home.url || url) || url;
+  let pages = [{url: finalUrl, html: home.text}];
+  const contacts = contactLinks(finalUrl, home.text).slice(0,5);
+  for (const link of contacts) { const r = await fetchText(link, 6500); if (r.text) pages.push({url: r.url || link, html: r.text}); }
+  const combined = pages.map(p => p.html).join('\n');
+  const text = stripHtml(combined).slice(0, 250000);
+  const emails = extractEmails(combined + ' ' + text);
+  const phones = extractPhones(text);
+  const title = titleFromHtml(home.text) || host(finalUrl);
+  const contactUrl = pages.find(p => p.url !== finalUrl && extractEmails(p.html).length)?.url || contacts[0] || '';
+  const scoring = classifyAndScore({url: finalUrl, title, text, emails, phones, location});
+  const priorityEmail = chooseEmail(emails);
+  return { url: finalUrl, title, phones, emails, priorityEmail, emailType: emailType(priorityEmail), contactUrl, notes: `Checked ${pages.length} pages`, ...scoring };
+}
+
+function serverPasses(lead, filters) {
+  filters = filters || {}; const text = [lead.title, lead.url, lead.type, lead.notes, (lead.emails||[]).join(' ')].join(' ').toLowerCase();
+  const exclude = Array.isArray(filters.excludeWords) ? filters.excludeWords : [];
+  if (exclude.some(w => w && text.includes(String(w).toLowerCase()))) return false;
+  if (filters.type && filters.type !== 'all' && lead.type !== filters.type) return false;
+  if (Number(filters.minScore || 0) && lead.score < Number(filters.minScore || 0)) return false;
+  if (Number(filters.minMatch || 0) && lead.match < Number(filters.minMatch || 0)) return false;
+  if (filters.matchLevel === 'strong' && lead.match < 70) return false;
+  if (filters.onlyEmail && !(lead.emails||[]).length) return false;
+  if (filters.onlyPhone && !(lead.phones||[]).length) return false;
+  if (filters.hideIrrelevant && lead.irrelevant) return false;
   return true;
 }
 
-function renderRows() {
-  filteredRows = rows.filter(rowPassesFilters);
-  if (document.getElementById('sortByScore').checked) {
-    filteredRows.sort(function(a, b) { return Number(b.lead_score || 0) - Number(a.lead_score || 0); });
-  }
-  tbody.innerHTML = '';
-  countEl.textContent = filteredRows.length + ' / ' + rows.length + ' 条';
-  downloadBtn.disabled = filteredRows.length === 0;
-
-  for (const row of filteredRows) {
-    const tr = document.createElement('tr');
-    const contact = row.contact_page_url ? '<a target="_blank" href="' + esc(row.contact_page_url) + '">打开</a>' : '';
-    tr.innerHTML =
-      '<td><span class="pill">' + esc(row.lead_score) + '</span></td>' +
-      '<td><span class="pill">' + esc(row.target_fit_score || '') + '</span><br><span class="muted">' + esc(row.target_category || '') + '</span></td>' +
-      '<td><strong>' + esc(row.business_name) + '</strong><br><a href="' + esc(row.website) + '" target="_blank">' + esc(row.website) + '</a></td>' +
-      '<td>' + esc(row.phone) + '</td>' +
-      '<td><strong>' + esc(row.priority_email) + '</strong><br><span class="muted">' + esc(row.email_type) + '</span></td>' +
-      '<td>' + esc((row.emails || []).join('; ')) + '</td>' +
-      '<td>' + contact + '</td>' +
-      '<td class="muted">' + esc([row.target_notes, row.notes].filter(Boolean).join('; ')) + '</td>';
-    tbody.appendChild(tr);
-  }
-}
-
-function addRow(row) {
-  rows.push(row);
-  renderRows();
-}
-
-function toCsvValue(v) {
-  const s = Array.isArray(v) ? v.join('; ') : String(v ?? '');
-  return '"' + s.replace(/"/g, '""') + '"';
-}
-
-function downloadCsv() {
-  const headers = [
-    'business_name','website','phone','emails','priority_email','email_type',
-    'contact_page_url','source','lead_score','target_fit_score','target_category','target_notes','notes','do_not_contact','created_at'
-  ];
-  const data = filteredRows.length ? filteredRows : rows;
-  const csv = [headers.join(',')].concat(data.map(function(r) { return headers.map(function(h) { return toCsvValue(r[h]); }).join(','); })).join('\\r\\n');
-  const blob = new Blob(['\\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'b2b-leads-filtered.csv';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-downloadBtn.addEventListener('click', downloadCsv);
-for (const id of ['filterText','filterType','minScore','minFit','fitCategory','excludeText','requireEmail','requirePhone','strictLocation','hideMedia','sortByScore']) {
-  document.addEventListener('input', function(e) { if (e.target && e.target.id === id) renderRows(); });
-  document.addEventListener('change', function(e) { if (e.target && e.target.id === id) renderRows(); });
-}
-
-
-startBtn.addEventListener('click', async () => {
-  rows.length = 0;
-  tbody.innerHTML = '';
-  countEl.textContent = '0 条';
-  filteredRows = [];
-  downloadBtn.disabled = true;
-  fillEl.style.width = '0%';
-  startBtn.disabled = true;
-
-  const payload = {
-    keyword: document.getElementById('keyword').value.trim(),
-    location: document.getElementById('location').value.trim(),
-    limit: Number(document.getElementById('limit').value || 20),
-    websites: document.getElementById('websites').value.trim()
-  };
-
-  if (!payload.keyword || !payload.location) {
-    setStatus('请填写关键词和地区');
-    startBtn.disabled = false;
-    return;
-  }
-
-  try {
-    setStatus('开始搜索...');
-    const res = await fetch('/api/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!res.ok || !res.body) {
-      const text = await res.text();
-      throw new Error(text || '请求失败');
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const msg = JSON.parse(line);
-        if (msg.type === 'status') setStatus(msg.message);
-        if (msg.type === 'progress') {
-          fillEl.style.width = Math.min(100, Math.round((msg.current / Math.max(1, msg.total)) * 100)) + '%';
-          setStatus(\`正在分析 \${msg.current}/\${msg.total}: \${msg.website || ''}\`);
-        }
-        if (msg.type === 'lead') addRow(msg.data);
-        if (msg.type === 'done') {
-          fillEl.style.width = '100%';
-          setStatus(\`完成：找到 \${rows.length} 条候选线索\`);
-        }
-        if (msg.type === 'error') setStatus('错误：' + msg.message);
-      }
-    }
-  } catch (err) {
-    setStatus('错误：' + err.message);
-  } finally {
-    startBtn.disabled = false;
-  }
-});
-</script>
-</body>
-</html>`;
-
 async function handleSearch(req, res) {
-  let body;
+  let payload={}; try { payload = JSON.parse(await readBody(req) || '{}'); } catch(e) { return json(res, 400, {error:'Bad JSON'}); }
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'Connection': 'keep-alive' });
+  const sendMsg = obj => res.write(JSON.stringify(obj) + '\n');
+  const started = Date.now(); const maxMs = 75000;
+  const keyword = String(payload.keyword || '').trim(); const location = String(payload.location || '').trim(); const target = Math.max(1, Math.min(50, Number(payload.target || 20))); const filters = payload.filters || {};
   try {
-    body = await parseBody(req);
-  } catch (error) {
-    return sendJson(res, 400, { error: 'Invalid JSON body' });
-  }
-
-  const keyword = normalizeWhitespace(body.keyword || '');
-  const location = normalizeWhitespace(body.location || '');
-  const limit = Math.max(1, Math.min(80, Number(body.limit || 20)));
-  const manualSites = parseManualWebsites(body.websites || '').slice(0, limit);
-
-  if (!manualSites.length && (!keyword || !location)) {
-    return sendJson(res, 400, { error: 'keyword and location are required, unless websites are provided' });
-  }
-
-  res.writeHead(200, {
-    'Content-Type': 'application/x-ndjson; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive'
-  });
-
-  const write = obj => res.write(JSON.stringify(obj) + '\n');
-
-  try {
-    let sites = manualSites;
-    if (sites.length) {
-      write({ type: 'status', message: `Using ${sites.length} websites from manual list. Analyzing...` });
-    } else {
-      write({ type: 'status', message: 'Searching public web results...' });
-      sites = await discoverCandidateSites(keyword, location, limit, write);
-      if (!sites.length) {
-        write({ type: 'status', message: 'No candidate websites found from public search. Try a more specific keyword, or paste website URLs into the manual website list.' });
-      } else {
-        write({ type: 'status', message: `Found ${sites.length} candidate websites. Analyzing...` });
+    sendMsg({type:'status', text:'开始准备候选网站...', progress:2});
+    let candidates = String(payload.manualUrls || '').split(/\r?\n/).map(normalizeUrl).filter(Boolean);
+    if (candidates.length) sendMsg({type:'status', text:`使用手动官网列表：${candidates.length} 个`, progress:8});
+    else {
+      const queries = buildQueries(keyword, location); const all=[]; let qi=0;
+      for (const q of queries) {
+        if (Date.now()-started > 25000) break;
+        qi++; sendMsg({type:'status', text:`公开搜索中 ${qi}/${queries.length}: ${q}`, progress:Math.min(30, 5 + qi*3)});
+        const [b,d] = await Promise.allSettled([searchBing(q, 12), searchDuck(q, 8)]);
+        if (b.status === 'fulfilled') all.push(...b.value); if (d.status === 'fulfilled') all.push(...d.value);
+        candidates = cleanCandidates(all).slice(0, Math.max(target * 3, 25));
+        if (candidates.length >= target * 2) break;
       }
     }
-
-    let current = 0;
-    for (const site of sites) {
-      current += 1;
-      write({ type: 'progress', current, total: sites.length, website: site.url });
-      const lead = await analyzeWebsite(site, { keyword, location });
-      const isManual = manualSites.length > 0;
-      if (isManual || lead.target_fit_score >= 45) {
-        write({ type: 'lead', data: lead });
-      } else {
-        write({ type: 'status', message: `跳过低相关结果：${lead.business_name || site.url}` });
-      }
-      await sleep(PAGE_DELAY_MS);
+    candidates = cleanCandidates(candidates).slice(0, Math.max(target * 3, 30));
+    if (!candidates.length) { sendMsg({type:'done', text:'没有找到候选网站。建议在上方直接粘贴官网列表，一行一个。', progress:100}); return res.end(); }
+    sendMsg({type:'status', text:`找到 ${candidates.length} 条候选线索，开始分析官网...`, progress:35});
+    let found=0, checked=0;
+    for (const u of candidates) {
+      if (Date.now()-started > maxMs) { sendMsg({type:'warn', text:`已达到防卡顿时间上限，已先返回 ${found} 条。可降低目标数量或使用官网列表。`}); break; }
+      checked++; sendMsg({type:'status', text:`正在分析 ${checked}/${candidates.length}: ${u}`, progress:35 + Math.floor((checked/candidates.length)*60)});
+      const lead = await analyzeSite(u, location);
+      if (serverPasses(lead, filters)) { found++; sendMsg({type:'lead', lead}); }
+      if (found >= target) break;
     }
-
-    write({ type: 'done', count: sites.length });
-  } catch (error) {
-    write({ type: 'error', message: error.message });
-  } finally {
+    sendMsg({type:'done', text:`完成：找到 ${found} 条筛选后线索，分析 ${checked} 个候选网站。`, progress:100});
     res.end();
-  }
+  } catch(e) { sendMsg({type:'done', text:'出错：' + e.message, progress:100}); res.end(); }
 }
 
-const server = http.createServer(async (req, res) => {
-  const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-
-  if (req.method === 'GET' && reqUrl.pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(INDEX_HTML);
-    return;
-  }
-
-  if (req.method === 'POST' && reqUrl.pathname === '/api/search') {
-    await handleSearch(req, res);
-    return;
-  }
-
-  if (req.method === 'GET' && reqUrl.pathname === '/health') {
-    return sendJson(res, 200, { ok: true });
-  }
-
-  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Not found');
+const server = http.createServer((req, res) => {
+  const path = new URL(req.url, `http://${req.headers.host}`).pathname;
+  if (req.method === 'GET' && path === '/') return send(res, 200, htmlPage());
+  if (req.method === 'GET' && path === '/health') return json(res, 200, {ok:true, version:VERSION});
+  if (req.method === 'POST' && path === '/api/search') return handleSearch(req, res);
+  return send(res, 404, 'Not found', 'text/plain; charset=utf-8');
 });
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('');
-  console.log('B2B Lead Scraper Free is running.');
+server.listen(PORT, () => {
+  console.log(`Cycling B2B Lead Scraper ${VERSION} is running.`);
   console.log(`Open: http://localhost:${PORT}`);
   console.log(`Render/Railway port: ${PORT}`);
-  console.log('');
 });
