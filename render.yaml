@@ -1,7 +1,7 @@
 services:
   - type: web
     name: b2b-lead-scraper-online
-    env: node
+    runtime: node
+    buildCommand: ""
+    startCommand: "npm start"
     plan: free
-    buildCommand: npm install
-    startCommand: npm start

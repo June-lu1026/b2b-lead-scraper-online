@@ -1,11 +1,10 @@
 {
   "name": "b2b-lead-scraper-online",
-  "version": "6.2.0",
-  "description": "Global cycling accessories B2B lead scraper - no external npm dependencies.",
+  "version": "6.3.0",
+  "description": "Global cycling B2B lead scraper - server-side stable submit version",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
