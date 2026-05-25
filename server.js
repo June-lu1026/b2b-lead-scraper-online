@@ -4,7 +4,7 @@ const http = require('http');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'v7.1 搜索修复版';
+const VERSION = 'v7.2 结果质量与表格修复版';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
@@ -104,7 +104,9 @@ const HARD_EXCLUDE = [
   'microsoft.com','bing.com','google.com','facebook.com','instagram.com','youtube.com','youtu.be','x.com','twitter.com',
   'linkedin.com','wikipedia.org','reddit.com','quora.com','pinterest.','amazon.','ebay.','aliexpress.','alibaba.',
   'cyclingnews.com','bikeradar.com','road.cc','pinkbike.com','singletracks.com','bikepacking.com',
-  'help.','support.','privacy policy','terms of service'
+  'help.','support.','privacy policy','terms of service',
+  'walmart.com','rei.com','giant-bicycles.com','trekbikes.com','specialized.com','cannondale.com',
+  'university','universität','college','research','study','pdf','brochure','manual','download','uploads'
 ];
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -131,10 +133,38 @@ function normalizeUrl(u='') {
 function domainFromUrl(u='') {
   try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; }
 }
+function isFileLike(url='') {
+  try {
+    const u = new URL(url);
+    return /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(u.pathname);
+  } catch { return /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(String(url)); }
+}
 function isBadCandidate(url, title, excludes) {
   const blob = lower(url + ' ' + title);
+  const host = lower(domainFromUrl(url));
+  if (isFileLike(url)) return true;
   const list = [...HARD_EXCLUDE, ...excludes.map(x => lower(x))];
-  return list.some(x => x && blob.includes(x));
+  if (list.some(x => x && blob.includes(x))) return true;
+  // Skip pages that are usually content, documents, or platforms rather than dealer/distributor homepages.
+  if (/\b(pdf|brochure|manual|catalog|catalogue|download|fileadmin|wp-content\/uploads|university|universität|research|study|guide|safety|gesetz|policy)\b/i.test(blob)) return true;
+  if (/\b(news|review|forum|blog|magazine|wiki|marketplace|classified|deals?|coupon)\b/i.test(blob)) return true;
+  if (/\b(walmart|amazon|ebay|aliexpress|alibaba|rei co-op|giant bicycles|trek bikes|specialized)\b/i.test(blob)) return true;
+  return false;
+}
+function extractPhones(text='') {
+  const raw = String(text).match(/(?:\+\d{1,3}[\s().-]?)?(?:\(?\d{2,5}\)?[\s().-]?){2,5}\d{2,5}/g) || [];
+  const out = [];
+  for (let ph of raw) {
+    ph = ph.replace(/\s+/g,' ').trim();
+    const digits = ph.replace(/\D/g,'');
+    if (digits.length < 7 || digits.length > 15) continue;
+    if (/000000|111111|222222|333333|444444|555555|666666|777777|888888|999999/.test(digits)) continue;
+    if (/\d+\.\d+/.test(ph)) continue; // coordinates / version numbers
+    if (/^(19|20)\d{2}/.test(digits) && digits.length < 10) continue;
+    if (!/[+()\s.-]/.test(ph) && digits.length > 11) continue;
+    if (!out.some(x => x.replace(/\D/g,'') === digits)) out.push(ph);
+  }
+  return out.slice(0,4);
 }
 function countryKey(c='') { return lower(c).replace(/\s+/g,' ').trim(); }
 function countryAliases(country='') {
@@ -353,14 +383,14 @@ function scoreLead({url,title,text,emails,phones,p}) {
   if (region.countryHit && p.country) { score += 12; match += 8; tags.push('country'); }
   if (region.cityHit && p.city) { score += 12; match += 8; tags.push('city'); }
 
-  if (/news|review|forum|blog|magazine|wiki|marketplace|classified/i.test(blob)) { score -= 35; match -= 15; tags.push('low-relevance'); }
+  if (/news|review|forum|blog|magazine|wiki|marketplace|classified|pdf|download|manual|brochure|university|walmart|amazon|ebay/i.test(blob)) { score -= 55; match -= 30; tags.push('low-relevance'); }
 
   return {score: Math.max(0, score), match: Math.max(0, match), tags: uniq(tags), region};
 }
 
 async function analyzeSite(candidate, p, diag) {
   const url = normalizeUrl(candidate.url);
-  if (!url) return null;
+  if (!url || isFileLike(url)) return null;
   const pages = [url];
   let allText = '';
   let allHtml = '';
@@ -381,7 +411,7 @@ async function analyzeSite(candidate, p, diag) {
   allHtml += first.text + '\n';
   allText += cleanHtmlText(first.text) + '\n';
   for (const e of first.text.match(EMAIL_RE) || []) emails.add(e.toLowerCase());
-  for (const ph of first.text.match(PHONE_RE) || []) if (String(ph).replace(/\D/g,'').length >= 7) phones.add(ph.trim());
+  // Phone numbers are extracted from cleaned text after all pages are collected, to avoid coordinates and file IDs.
 
   const links = extractRelevantLinks(url, first.text);
   for (const link of links.slice(0,3)) {
@@ -391,11 +421,11 @@ async function analyzeSite(candidate, p, diag) {
     allHtml += rr.text + '\n';
     allText += cleanHtmlText(rr.text) + '\n';
     for (const e of rr.text.match(EMAIL_RE) || []) emails.add(e.toLowerCase());
-    for (const ph of rr.text.match(PHONE_RE) || []) if (String(ph).replace(/\D/g,'').length >= 7) phones.add(ph.trim());
+    // defer phone extraction to final cleaned text
   }
 
   const emailList = uniq([...emails]).filter(e => !/\.(png|jpg|jpeg|gif|webp)$/i.test(e));
-  const phoneList = uniq([...phones]).slice(0,3);
+  const phoneList = extractPhones(allText).slice(0,3);
   const title = candidate.title || (first.text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1] || domainFromUrl(url);
 
   const sc = scoreLead({url,title,text:allText,emails:emailList,phones:phoneList,p});
@@ -416,6 +446,8 @@ async function analyzeSite(candidate, p, diag) {
 
 function passFinalFilters(r, p) {
   if (!r) return false;
+  if (isBadCandidate(r.url, r.title, splitCSV(p.exclude))) return false;
+  if (r.tags && r.tags.includes('low-relevance')) return false;
   if (Number(r.score) < Number(p.minScore || 0)) return false;
   if (Number(r.match) < Number(p.minMatch || 0)) return false;
   if (p.onlyEmail && !r.emails.length) return false;
@@ -505,7 +537,7 @@ async function runSearch(p) {
   if (!manual.length && diag.candidatesRaw === 0) {
     diag.message = '公开搜索源返回 0 个候选网站。请尝试更短的关键词，或直接粘贴官网列表。';
   } else if (diag.candidatesAfterExclude === 0) {
-    diag.message = '候选网站都被排除关键词/域名过滤掉了。请减少排除词。';
+    diag.message = '候选网站都被排除关键词/域名或文件/平台过滤掉了。请减少排除词，或改用手动官网列表。';
   } else if (diag.candidatesAfterRegionPreFilter === 0) {
     diag.message = '严格地区筛选过滤掉了所有候选。请改为“相关优先”或“不限制”。';
   } else if (results.length === 0) {
@@ -521,7 +553,7 @@ function paramsFromUrl(urlObj) {
   return {
     urls: formValue(q,'urls',''),
     type: formValue(q,'type','all'),
-    countryMode: formValue(q,'countryMode','prefer'),
+    countryMode: formValue(q,'countryMode','strict'),
     country: formValue(q,'country','Germany'),
     cityMode: formValue(q,'cityMode','prefer'),
     city: formValue(q,'city','Berlin'),
@@ -529,7 +561,7 @@ function paramsFromUrl(urlObj) {
     keyword: formValue(q,'keyword','bike shop'),
     product: formValue(q,'product','bike parts, cycling accessories, power meter, crankset'),
     required: formValue(q,'required','bike,bicycle,cycling,shop,dealer,distributor,parts'),
-    exclude: formValue(q,'exclude','microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine'),
+    exclude: formValue(q,'exclude','microsoft,bing,google,facebook,instagram,youtube,amazon,ebay,wikipedia,reddit,cyclingnews,news,review,forum,blog,magazine,pdf,download,manual,brochure,walmart,rei,giant,trek,specialized'),
     minScore: parseInt(formValue(q,'minScore','0'),10) || 0,
     minMatch: parseInt(formValue(q,'minMatch','0'),10) || 0,
     onlyEmail: q.get('onlyEmail') === 'on',
@@ -588,7 +620,7 @@ label{font-size:13px;color:#334155;display:block;margin-bottom:6px}input,textare
 button,.btn{border:0;border-radius:12px;padding:14px 22px;background:#0f172a;color:#fff;font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}.btn.secondary{background:#94a3b8}.actions{display:flex;gap:12px;align-items:end}
 .checks{display:flex;gap:22px;margin:14px 0}.checks label{display:flex;align-items:center;gap:8px;margin:0}.checks input{width:auto}
 .progress{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin-top:10px}.bar{height:100%;background:#0f172a;width:${data ? '100' : '0'}%}
-table{width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;font-size:14px}th,td{border-bottom:1px solid #e2e8f0;padding:12px;text-align:left;vertical-align:top}th{background:#f8fafc}.badge{background:#e0e7ff;border-radius:999px;padding:4px 8px;color:#3730a3;font-size:12px}.badge.muted{background:#e2e8f0;color:#334155}
+.tableWrap{width:100%;overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px}table{width:100%;min-width:1120px;border-collapse:collapse;font-size:14px;table-layout:fixed}th,td{border-bottom:1px solid #e2e8f0;padding:12px;text-align:left;vertical-align:top;word-break:break-word}th{background:#f8fafc}.badge{background:#e0e7ff;border-radius:999px;padding:4px 8px;color:#3730a3;font-size:12px}.badge.muted{background:#e2e8f0;color:#334155}
 .diag{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-top:14px;line-height:1.6}.diag pre{white-space:pre-wrap;max-height:260px;overflow:auto}
 @media(max-width:900px){.grid,.grid3{grid-template-columns:1fr}.actions{align-items:stretch}.wrap{padding:0 12px}}
 </style>
@@ -597,7 +629,7 @@ table{width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius
 <div class="wrap">
   <div class="card">
     <h1>全球骑行配件 B2B 线索采集工具 <span class="version">${VERSION}</span></h1>
-    <p class="lead">面向全球寻找自行车店、骑行店、配件经销商、批发商、分销商、进口商官网，并从公开页面提取邮箱和电话。</p>
+    <p class="lead">面向全球寻找自行车店、骑行店、配件经销商、批发商、分销商、进口商官网，并从公开页面提取邮箱和电话。此版会过滤 PDF、新闻测评、大平台、品牌官网和非客户页面。</p>
     <div class="notice"><b>说明：</b> 免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。默认排除的是搜索引擎、社媒、新闻测评、论坛、百科和大平台页面，不是排除你的浏览器。</div>
 
     <form method="GET" action="/search">
@@ -653,10 +685,10 @@ table{width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius
       <h2>结果 ${results.length} 条</h2>
       <a class="btn secondary" href="data:text/csv;charset=utf-8,${csvData}" download="global-cycling-b2b-leads.csv">下载 CSV</a>
     </div>
-    <table>
-      <thead><tr><th>分数</th><th>匹配度</th><th>类型</th><th>公司/网站</th><th>电话</th><th>优先邮箱</th><th>全部邮箱</th><th>Contact 页面</th><th>备注</th></tr></thead>
+    <div class="tableWrap"><table>
+      <thead><tr><th style="width:64px">分数</th><th style="width:70px">匹配度</th><th style="width:90px">类型</th><th style="width:300px">公司/网站</th><th style="width:140px">电话</th><th style="width:180px">优先邮箱</th><th style="width:240px">全部邮箱</th><th style="width:110px">Contact 页面</th><th style="width:120px">备注</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="9" class="small">暂无结果。可以降低筛选条件，或者直接粘贴官网列表。</td></tr>'}</tbody>
-    </table>
+    </table></div>
   </div>
 </div>
 </body>
