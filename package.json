@@ -1,6 +1,6 @@
 {
   "name": "b2b-lead-scraper-online",
-  "version": "6.6.0",
+  "version": "6.7.0",
   "description": "Global cycling B2B lead scraper - stable filtered version",
   "main": "server.js",
   "scripts": {

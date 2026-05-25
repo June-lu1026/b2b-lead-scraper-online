@@ -4,7 +4,7 @@ const http = require('http');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'v6.6 稳定筛选版';
+const VERSION = 'v6.7 真正地区筛选版';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const MAX_TOTAL_MS = 28000;
 const SEARCH_TIMEOUT_MS = 6500;
@@ -407,10 +407,10 @@ function applyFilters(results, p) {
     if (r.score < minScore || r.match < minMatch) return false;
     if (!r.requiredOk) return false;
     if (p.type !== 'all' && !r.typeMatch) return false;
-    if (regionMode === 'strict') {
-      if (countries.length && r.regionCountry <= 0) return false;
-      if (cities.length && r.regionCity <= 0) return false;
-    }
+    const countryMode = p.countryFilterMode || regionMode;
+    const cityMode = p.cityFilterMode || regionMode;
+    if (countryMode === 'strict' && countries.length && r.regionCountry <= 0) return false;
+    if (cityMode === 'strict' && cities.length && r.regionCity <= 0) return false;
     return true;
   });
 }
@@ -450,9 +450,12 @@ async function performSearch(p) {
     const pre = scoreRegion(`${c.title || ''} ${c.snippet || ''}`, c.url, countries, cities);
     return { ...c, preRegion: pre.countryScore + pre.cityScore };
   });
-  if ((p.regionMode || 'prefer') === 'strict') {
-    // Keep uncertain candidates too; some sites only show location inside homepage. This avoids over-filtering before fetch.
-    candidates = candidates.filter(c => c.preRegion > 0 || diagnostics.mode === 'manual');
+  const countryMode = p.countryFilterMode || p.regionMode || 'prefer';
+  const cityMode = p.cityFilterMode || p.regionMode || 'prefer';
+  if ((countryMode === 'strict' || cityMode === 'strict') && diagnostics.mode !== 'manual') {
+    // Only pre-filter candidates that already show some location signal in search results.
+    // Final strict filtering still happens after homepage/contact-page analysis.
+    candidates = candidates.filter(c => c.preRegion > 0);
   }
   candidates.sort((a, b) => (b.preRegion || 0) - (a.preRegion || 0));
   diagnostics.afterPreRegion = candidates.length;
@@ -487,6 +490,8 @@ function defaultParams() {
     minScore: '0',
     minMatch: '0',
     regionMode: 'prefer',
+    countryFilterMode: 'prefer',
+    cityFilterMode: 'prefer',
     sort: 'score',
     emailOnly: false,
     phoneOnly: false,
@@ -510,6 +515,8 @@ function paramsFromQuery(q) {
     minScore: getParam(q, 'minScore', d.minScore),
     minMatch: getParam(q, 'minMatch', d.minMatch),
     regionMode: getParam(q, 'regionMode', d.regionMode),
+    countryFilterMode: getParam(q, 'countryFilterMode', d.countryFilterMode || d.regionMode),
+    cityFilterMode: getParam(q, 'cityFilterMode', d.cityFilterMode || d.regionMode),
     sort: getParam(q, 'sort', d.sort),
     emailOnly: q.get('emailOnly') === 'on',
     phoneOnly: q.get('phoneOnly') === 'on',
@@ -524,6 +531,8 @@ function select(name, value, options) {
 
 function renderForm(p) {
   const typeOptions = Object.entries(TYPE_CONFIG).map(([k, v]) => [k, v.label]);
+  const countryMode = p.countryFilterMode || p.regionMode || 'prefer';
+  const cityMode = p.cityFilterMode || p.regionMode || 'prefer';
   return `
   <form action="/search" method="GET" class="card form-card" id="leadForm">
     <input type="hidden" name="submitted" value="1">
@@ -532,10 +541,20 @@ function renderForm(p) {
     <div class="notice"><b>说明：</b> 免费版不调用 Google Maps/Places，所以没有稳定的地图商家电话、地址和前 100 商家保证。默认排除的是搜索引擎、社媒、新闻测评、论坛、百科和大平台页面，不是排除你的浏览器。</div>
     <label class="wide">可选：直接粘贴官网列表，一行一个。填写这里会优先分析这些网站，不依赖公开搜索。</label>
     <textarea name="manualUrls" placeholder="例如：\nhttps://example-bike-shop.de\nhttps://example-distributor.com">${esc(p.manualUrls)}</textarea>
+
+    <div class="filter-box">
+      <h2>地区筛选</h2>
+      <p>这里不再只是搜索词，而是真正筛选条件。选择“严格匹配”时，结果必须能在域名、标题或网页内容里匹配国家/城市信号。</p>
+      <div class="grid region-grid">
+        <label>国家/市场筛选${select('countryFilterMode', countryMode, [['off','不限制国家'],['prefer','国家相关优先'],['strict','严格匹配国家']])}</label>
+        <label>国家/市场，可多个<input name="country" value="${esc(p.country)}" placeholder="Germany, France, USA"></label>
+        <label>城市/地区筛选${select('cityFilterMode', cityMode, [['off','不限制城市'],['prefer','城市相关优先'],['strict','严格匹配城市']])}</label>
+        <label>城市/地区，可多个<input name="city" value="${esc(p.city)}" placeholder="Berlin, Paris, Los Angeles"></label>
+      </div>
+    </div>
+
     <div class="grid">
       <label>目标客户类型${select('type', p.type, typeOptions)}</label>
-      <label>国家/市场，可多个<input name="country" value="${esc(p.country)}" placeholder="Germany, France, USA"></label>
-      <label>城市/地区，可多个<input name="city" value="${esc(p.city)}" placeholder="Berlin, Paris, Los Angeles"></label>
       <label>目标数量<input name="limit" type="number" min="1" max="50" value="${esc(p.limit)}"></label>
       <label>主搜索关键词<input name="mainKeyword" value="${esc(p.mainKeyword)}" placeholder="bike shop / bike dealer"></label>
       <label>产品方向标签<input name="productTags" value="${esc(p.productTags)}" placeholder="bike parts, cycling accessories"></label>
@@ -543,9 +562,9 @@ function renderForm(p) {
       <label>排除关键词/域名，可编辑<input name="excludes" value="${esc(p.excludes)}" placeholder="microsoft,bing,news,review"></label>
       <label>最低总分<input name="minScore" type="number" min="0" max="100" value="${esc(p.minScore)}"></label>
       <label>最低匹配度<input name="minMatch" type="number" min="0" max="100" value="${esc(p.minMatch)}"></label>
-      <label>地区筛选${select('regionMode', p.regionMode, [['prefer','相关优先'],['strict','严格筛选：必须匹配国家/城市']])}</label>
       <label>排序${select('sort', p.sort, [['score','按分数排序'],['match','按匹配度排序'],['email','有邮箱优先']])}</label>
     </div>
+    <input type="hidden" name="regionMode" value="${esc(countryMode === 'strict' || cityMode === 'strict' ? 'strict' : 'prefer')}">
     <div class="checks">
       <label><input type="checkbox" name="emailOnly" ${p.emailOnly ? 'checked' : ''}> 只看有邮箱</label>
       <label><input type="checkbox" name="phoneOnly" ${p.phoneOnly ? 'checked' : ''}> 只看有电话</label>
@@ -554,7 +573,7 @@ function renderForm(p) {
       <button class="primary" type="submit">开始提取</button>
       <a class="reset" href="/">重置</a>
     </div>
-    <p class="hint">国家/城市现在会参与搜索词构造和最终筛选。若公开搜索返回少，建议把地区筛选设为“相关优先”，或直接粘贴官网列表。</p>
+    <p class="hint">建议：先用“国家相关优先 + 城市相关优先”拿到结果；结果太杂时，再改成“严格匹配国家/城市”。如果公开搜索 0 条，直接粘贴官网列表最稳。</p>
   </form>`;
 }
 
@@ -600,7 +619,7 @@ function toCsv(results) {
 function renderPage(p, results, diagnostics, processingText) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>全球骑行配件 B2B 线索采集工具</title><style>
     :root{--bg:#f4f6fb;--card:#fff;--text:#0f172a;--muted:#667085;--line:#e2e8f0;--brand:#0f172a;--soft:#f8fafc;--accent:#dcfce7;--orange:#fff7ed;--orange-line:#fdba74}
-    *{box-sizing:border-box}body{font-family:Arial,'Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:32px}.wrap{max-width:1180px;margin:0 auto}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:22px;box-shadow:0 12px 35px rgba(15,23,42,.06)}h1{margin:0 0 8px;font-size:30px}.subtitle{color:#475569;margin:0 0 16px}.badge{font-size:13px;background:var(--accent);padding:7px 12px;border-radius:999px;color:#047857;vertical-align:middle}.notice{background:var(--orange);border:1px solid var(--orange-line);color:#9a3412;border-radius:12px;padding:14px 16px;margin:18px 0}.wide{display:block;margin-bottom:8px;color:#475569}textarea{width:100%;min-height:88px;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font-size:14px}label{font-size:13px;color:#475569}input,select{display:block;width:100%;height:42px;border:1px solid #cbd5e1;border-radius:11px;padding:0 12px;font-size:15px;background:#fff;margin-top:6px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}.checks{display:flex;gap:28px;margin:18px 0}.checks input{display:inline;width:auto;height:auto;margin-right:6px}.actions{display:flex;gap:12px;justify-content:flex-end;align-items:center}.primary{border:0;background:#0f172a;color:#fff;border-radius:12px;padding:14px 28px;font-size:17px;font-weight:700;cursor:pointer}.reset{display:inline-block;background:#94a3b8;color:#fff;border-radius:12px;padding:14px 24px;text-decoration:none;font-weight:700}.hint{font-size:12px;color:#64748b;margin:12px 0 0}.bar{height:12px;background:#0f172a;border-radius:99px;margin-top:14px}.result-head{display:flex;justify-content:space-between;align-items:center}.download{background:#334155;color:#fff;text-decoration:none;padding:12px 20px;border-radius:12px;font-weight:700}.download.disabled{background:#94a3b8;pointer-events:none}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:top}th{background:#f8fafc}.score{display:inline-block;background:#eef2ff;color:#4338ca;border-radius:999px;padding:4px 8px}.small{font-size:12px;color:#64748b}.empty{color:#64748b}.diag h3{margin-top:0}.diag-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.diag-grid span{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px}.reason{color:#9a3412;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px}@media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.diag-grid{grid-template-columns:1fr 1fr}.actions{justify-content:stretch}.primary,.reset{width:50%;text-align:center}}
+    *{box-sizing:border-box}body{font-family:Arial,'Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:32px}.wrap{max-width:1180px;margin:0 auto}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:22px;box-shadow:0 12px 35px rgba(15,23,42,.06)}h1{margin:0 0 8px;font-size:30px}.subtitle{color:#475569;margin:0 0 16px}.badge{font-size:13px;background:var(--accent);padding:7px 12px;border-radius:999px;color:#047857;vertical-align:middle}.notice{background:var(--orange);border:1px solid var(--orange-line);color:#9a3412;border-radius:12px;padding:14px 16px;margin:18px 0}.wide{display:block;margin-bottom:8px;color:#475569}textarea{width:100%;min-height:88px;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font-size:14px}label{font-size:13px;color:#475569}input,select{display:block;width:100%;height:42px;border:1px solid #cbd5e1;border-radius:11px;padding:0 12px;font-size:15px;background:#fff;margin-top:6px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}.filter-box{margin:18px 0;padding:16px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:14px}.filter-box h2{font-size:18px;margin:0 0 6px}.filter-box p{margin:0 0 10px;color:#475569;font-size:13px}.region-grid{grid-template-columns:repeat(4,1fr)}.checks{display:flex;gap:28px;margin:18px 0}.checks input{display:inline;width:auto;height:auto;margin-right:6px}.actions{display:flex;gap:12px;justify-content:flex-end;align-items:center}.primary{border:0;background:#0f172a;color:#fff;border-radius:12px;padding:14px 28px;font-size:17px;font-weight:700;cursor:pointer}.reset{display:inline-block;background:#94a3b8;color:#fff;border-radius:12px;padding:14px 24px;text-decoration:none;font-weight:700}.hint{font-size:12px;color:#64748b;margin:12px 0 0}.bar{height:12px;background:#0f172a;border-radius:99px;margin-top:14px}.result-head{display:flex;justify-content:space-between;align-items:center}.download{background:#334155;color:#fff;text-decoration:none;padding:12px 20px;border-radius:12px;font-weight:700}.download.disabled{background:#94a3b8;pointer-events:none}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:top}th{background:#f8fafc}.score{display:inline-block;background:#eef2ff;color:#4338ca;border-radius:999px;padding:4px 8px}.small{font-size:12px;color:#64748b}.empty{color:#64748b}.diag h3{margin-top:0}.diag-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.diag-grid span{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px}.reason{color:#9a3412;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px}@media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.diag-grid{grid-template-columns:1fr 1fr}.actions{justify-content:stretch}.primary,.reset{width:50%;text-align:center}}
   </style></head><body><div class="wrap">${renderForm(p)}${processingText || ''}${renderDiagnostics(diagnostics)}${renderResults(results || [], p)}</div></body></html>`;
 }
 
