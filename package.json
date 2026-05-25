@@ -1,13 +1,1 @@
-{
-  "name": "b2b-lead-scraper-online",
-  "version": "6.8.0",
-  "description": "Global cycling B2B lead scraper - v6.8 real filter boxes",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "license": "UNLICENSED"
-}
+{"scripts":{"start":"node server.js"},"dependencies":{},"engines":{"node":">=18"},"name":"b2b-lead-scraper-online","version":"7.0.0"}
